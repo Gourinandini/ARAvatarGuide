@@ -40,6 +40,19 @@
         android:background="#80000000"
         android:padding="8dp"/>
 
+    <!-- OCR Auto-Detection Status Overlay -->
+    <TextView
+        android:id="@+id/tvOcrStatus"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="top|start"
+        android:layout_margin="16dp"
+        android:textColor="#00E676"
+        android:textSize="14sp"
+        android:text="OCR Scanning..."
+        android:background="#80000000"
+        android:padding="8dp" />
+
     <TextView
         android:id="@+id/tvDestination"
         android:layout_width="wrap_content"

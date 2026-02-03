@@ -106,6 +106,18 @@
             android:layout_marginBottom="8dp"
             android:visibility="gone" />
 
+        <!-- Capture Text Button (visible during recording) -->
+        <Button
+            android:id="@+id/btnCaptureText"
+            android:layout_width="match_parent"
+            android:layout_height="60dp"
+            android:text="🔍 Capture Text Location (OCR)"
+            android:backgroundTint="#2196F3"
+            android:textColor="@android:color/white"
+            android:textSize="16sp"
+            android:layout_marginBottom="8dp"
+            android:visibility="gone" />
+
         <!-- Stop Recording Button (visible during recording) -->
         <Button
             android:id="@+id/btnStopRecording"

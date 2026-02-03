@@ -24,10 +24,14 @@ import com.google.ar.core.Config
 import com.google.ar.core.Session
 import com.google.ar.core.TrackingState
 import com.google.ar.core.exceptions.CameraNotAvailableException
+import com.google.ar.core.exceptions.NotYetAvailableException
 import com.google.firebase.database.DataSnapshot
 import com.google.firebase.database.DatabaseError
 import com.google.firebase.database.FirebaseDatabase
 import com.google.firebase.database.ValueEventListener
+import com.google.mlkit.vision.common.InputImage
+import com.google.mlkit.vision.text.TextRecognition
+import com.google.mlkit.vision.text.latin.TextRecognizerOptions
 import javax.microedition.khronos.egl.EGLConfig
 import javax.microedition.khronos.opengles.GL10
 
@@ -42,6 +46,7 @@ class ARActivity : AppCompatActivity(), GLSurfaceView.Renderer {
     private lateinit var etStartPoint: EditText
     private lateinit var btnStartRecording: Button
     private lateinit var btnMarkWaypoint: Button
+    private lateinit var btnCaptureText: Button
     private lateinit var btnStopRecording: Button
     private lateinit var btnEmergency: Button
     private lateinit var layoutStartPoint: LinearLayout
@@ -60,6 +65,9 @@ class ARActivity : AppCompatActivity(), GLSurfaceView.Renderer {
     private lateinit var database: FirebaseDatabase
     private lateinit var firebasePathManager: FirebasePathManager
     private var isEmergencyActive = false
+
+    private val recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
+    private var shouldCaptureText = false
 
     companion object {
         private const val CAMERA_PERMISSION_CODE = 100
@@ -82,6 +90,7 @@ class ARActivity : AppCompatActivity(), GLSurfaceView.Renderer {
         etStartPoint = findViewById(R.id.etStartPoint)
         btnStartRecording = findViewById(R.id.btnStartRecording)
         btnMarkWaypoint = findViewById(R.id.btnMarkWaypoint)
+        btnCaptureText = findViewById(R.id.btnCaptureText)
         btnStopRecording = findViewById(R.id.btnStopRecording)
         btnEmergency = findViewById(R.id.btnEmergency)
         layoutStartPoint = findViewById(R.id.layoutStartPoint)
@@ -96,11 +105,13 @@ class ARActivity : AppCompatActivity(), GLSurfaceView.Renderer {
         // Setup buttons
         btnStartRecording.setOnClickListener { startRecording() }
         btnMarkWaypoint.setOnClickListener { showNameWaypointDialog() }
+        btnCaptureText.setOnClickListener { shouldCaptureText = true }
         btnStopRecording.setOnClickListener { stopRecording() }
         btnEmergency.setOnClickListener { toggleEmergency() }
 
         // Initially hide these buttons
         btnMarkWaypoint.visibility = View.GONE
+        btnCaptureText.visibility = View.GONE
         btnStopRecording.visibility = View.GONE
 
         if (!hasCameraPermission()) {
@@ -154,6 +165,7 @@ class ARActivity : AppCompatActivity(), GLSurfaceView.Renderer {
         runOnUiThread {
             layoutStartPoint.visibility = View.GONE
             btnMarkWaypoint.visibility = View.VISIBLE
+            btnCaptureText.visibility = View.VISIBLE
             btnStopRecording.visibility = View.VISIBLE
             tvRecordingStatus.visibility = View.VISIBLE
             tvWaypointCount.visibility = View.VISIBLE
@@ -228,6 +240,7 @@ class ARActivity : AppCompatActivity(), GLSurfaceView.Renderer {
                     tvWaypointCount.visibility = View.GONE
                     tvPathInfo.visibility = View.GONE
                     btnMarkWaypoint.visibility = View.GONE
+                    btnCaptureText.visibility = View.GONE
                     btnStopRecording.visibility = View.GONE
                     layoutStartPoint.visibility = View.VISIBLE
                     etStartPoint.text.clear()
@@ -288,7 +301,7 @@ class ARActivity : AppCompatActivity(), GLSurfaceView.Renderer {
         }
         try {
             arSession?.resume()
-            surfaceView.onResume() // FIXED: Removed 'binding.'
+            surfaceView.onResume()
         } catch (e: CameraNotAvailableException) {
             Log.e(TAG, "Camera not available", e)
             arSession = null
@@ -297,7 +310,7 @@ class ARActivity : AppCompatActivity(), GLSurfaceView.Renderer {
 
     override fun onPause() {
         super.onPause()
-        surfaceView.onPause() // FIXED: Removed 'binding.'
+        surfaceView.onPause()
         arSession?.pause()
     }
 
@@ -306,18 +319,18 @@ class ARActivity : AppCompatActivity(), GLSurfaceView.Renderer {
         arSession?.close()
     }
 
-    override fun onSurfaceCreated(gl: GL10?, config: EGLConfig?) {
+    override fun onSurfaceCreated(gl: GL10, config: EGLConfig) {
         GLES20.glClearColor(0.1f, 0.1f, 0.1f, 1.0f)
         backgroundRenderer = BackgroundRenderer().apply { createOnGlThread(this@ARActivity) }
         renderer = SimpleRenderer().apply { createOnGlThread() }
     }
 
-    override fun onSurfaceChanged(gl: GL10?, width: Int, height: Int) {
+    override fun onSurfaceChanged(gl: GL10, width: Int, height: Int) {
         GLES20.glViewport(0, 0, width, height)
         arSession?.setDisplayGeometry(0, width, height)
     }
 
-    override fun onDrawFrame(gl: GL10?) {
+    override fun onDrawFrame(gl: GL10) {
         GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT or GLES20.GL_DEPTH_BUFFER_BIT)
         val session = arSession ?: return
         try {
@@ -328,6 +341,12 @@ class ARActivity : AppCompatActivity(), GLSurfaceView.Renderer {
             backgroundRenderer?.draw(frame)
 
             if (camera.trackingState != TrackingState.TRACKING) return
+
+            // OCR Capture logic
+            if (shouldCaptureText) {
+                shouldCaptureText = false
+                processImageForOCR(frame)
+            }
 
             if (pathRecorder.isCurrentlyRecording()) {
                 val pendingName = pendingWaypointName
@@ -348,7 +367,7 @@ class ARActivity : AppCompatActivity(), GLSurfaceView.Renderer {
                         runOnUiThread { updateWaypointCount() }
                     }
                 }
-            }
+            }   
 
             val viewMatrix = FloatArray(16)
             val projectionMatrix = FloatArray(16)
@@ -368,6 +387,48 @@ class ARActivity : AppCompatActivity(), GLSurfaceView.Renderer {
             }
         } catch (e: Exception) {
             Log.e(TAG, "Error in onDrawFrame", e)
+        }
+    }
+
+    private fun processImageForOCR(frame: com.google.ar.core.Frame) {
+        try {
+            val image = frame.acquireCameraImage()
+            val inputImage = InputImage.fromMediaImage(image, 90) // ARCore camera is usually rotated 90deg
+
+            recognizer.process(inputImage)
+                .addOnSuccessListener { visionText ->
+                    image.close()
+                    val detectedStrings = visionText.textBlocks.map { it.text }
+                    if (detectedStrings.isNotEmpty()) {
+                        showOCRSelectionDialog(detectedStrings)
+                    } else {
+                        runOnUiThread {
+                            Toast.makeText(this, "No text detected", Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                }
+                .addOnFailureListener { e ->
+                    image.close()
+                    Log.e(TAG, "OCR failed", e)
+                }
+        } catch (e: NotYetAvailableException) {
+            Log.e(TAG, "Frame not yet available for OCR", e)
+        } catch (e: Exception) {
+            Log.e(TAG, "Error acquiring camera image", e)
+        }
+    }
+
+    private fun showOCRSelectionDialog(detectedTexts: List<String>) {
+        runOnUiThread {
+            val items = detectedTexts.toTypedArray()
+            AlertDialog.Builder(this)
+                .setTitle("Select Detected Text")
+                .setItems(items) { _, which ->
+                    val selectedText = items[which]
+                    markCurrentPositionAsWaypoint(selectedText.uppercase())
+                }
+                .setNegativeButton("Cancel", null)
+                .show()
         }
     }
 }

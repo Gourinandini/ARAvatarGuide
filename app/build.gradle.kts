@@ -59,4 +59,5 @@ dependencies {
     implementation("com.google.firebase:firebase-database-ktx")
     implementation(platform("com.google.firebase:firebase-bom:32.7.2"))
     implementation("androidx.constraintlayout:constraintlayout:2.1.4")
+    implementation("com.google.mlkit:text-recognition:16.0.0")
 }

@@ -20,10 +20,14 @@ import androidx.core.content.ContextCompat
 import com.example.aravatarguide.databinding.ActivityVisitorBinding
 import com.google.ar.core.*
 import com.google.ar.core.exceptions.CameraNotAvailableException
+import com.google.ar.core.exceptions.NotYetAvailableException
 import com.google.firebase.database.DataSnapshot
 import com.google.firebase.database.DatabaseError
 import com.google.firebase.database.FirebaseDatabase
 import com.google.firebase.database.ValueEventListener
+import com.google.mlkit.vision.common.InputImage
+import com.google.mlkit.vision.text.TextRecognition
+import com.google.mlkit.vision.text.latin.TextRecognizerOptions
 import java.util.*
 import javax.microedition.khronos.egl.EGLConfig
 import javax.microedition.khronos.opengles.GL10
@@ -63,6 +67,16 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
 
     private lateinit var database: FirebaseDatabase
     private lateinit var firebasePathManager: FirebasePathManager
+
+    // OCR components
+    private val textRecognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
+    private var lastOcrTimestamp = 0L
+    private val OCR_INTERVAL_MS = 2000L // Run OCR every 2 seconds
+    private var isOcrProcessing = false
+
+    // Coordinate Mapping: Offset = Local AR Coords - Map/Saved Coords
+    private var coordinateOffset = floatArrayOf(0f, 0f, 0f)
+    private var isOffsetInitialized = false
 
     companion object {
         private const val PERMISSION_CODE = 100
@@ -262,32 +276,93 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
     private fun recognizeUserPosition(currentPosition: List<Float>) {
         if (isPositionRecognized || floorGraph == null) return
 
+        // Note: Without coordinate mapping, this only works if user started at (0,0,0) map.
+        // We favor OCR for more accurate 'entry' at any point.
         val closestNamedWaypoint = floorGraph!!.findNearestNamedWaypoint(currentPosition)
 
         if (closestNamedWaypoint != null) {
-            isPositionRecognized = true
-            userCurrentPosition = currentPosition
-            Log.d(TAG, "Position recognized near: ${closestNamedWaypoint.name}")
+            val mapPos = closestNamedWaypoint.position.map { it.toFloat() }
+            completePositionRecognition(closestNamedWaypoint.name, mapPos, currentPosition)
+        }
+    }
 
-            runOnUiThread {
-                binding.tvStatus.text = "Position recognized near ${closestNamedWaypoint.name}"
-                binding.btnMicrophone.isEnabled = true
-                Toast.makeText(this, "✅ Position recognized!", Toast.LENGTH_SHORT).show()
-            }
+    private fun completePositionRecognition(locationName: String, mapPosition: List<Float>, localPosition: List<Float>) {
+        // Calculate the translation offset between Local space and Map space
+        coordinateOffset[0] = localPosition[0] - mapPosition[0]
+        coordinateOffset[1] = localPosition[1] - mapPosition[1]
+        coordinateOffset[2] = localPosition[2] - mapPosition[2]
+        isOffsetInitialized = true
+        
+        isPositionRecognized = true
+        userCurrentPosition = mapPosition
+        
+        Log.d(TAG, "Position recognized near: $locationName. Offset set: [${coordinateOffset[0]}, ${coordinateOffset[1]}, ${coordinateOffset[2]}]")
 
-            if (isTtsReady && !hasAskedInitialQuestion && pendingDestination == null) {
-                hasAskedInitialQuestion = true
-                speak("Hello! You are near ${closestNamedWaypoint.name}. Where would you like to go?")
+        runOnUiThread {
+            binding.tvStatus.text = "Position recognized near $locationName"
+            binding.btnMicrophone.isEnabled = true
+            Toast.makeText(this, "✅ Position recognized: $locationName", Toast.LENGTH_SHORT).show()
+        }
+
+        if (isTtsReady && !hasAskedInitialQuestion && pendingDestination == null) {
+            hasAskedInitialQuestion = true
+            speak("Hello! You are near $locationName. Where would you like to go?")
+        }
+    }
+
+    private fun runAutoOcr(frame: Frame) {
+        val currentTime = System.currentTimeMillis()
+        if (isOcrProcessing || currentTime - lastOcrTimestamp < OCR_INTERVAL_MS || isPositionRecognized) return
+
+        val cameraPose = frame.camera.pose
+
+        try {
+            val image = frame.acquireCameraImage()
+            isOcrProcessing = true
+            val inputImage = InputImage.fromMediaImage(image, 90)
+
+            textRecognizer.process(inputImage)
+                .addOnSuccessListener { visionText ->
+                    image.close()
+                    lastOcrTimestamp = currentTime
+                    isOcrProcessing = false
+
+                    val detectedTexts = visionText.textBlocks.map { it.text.uppercase() }
+                    checkOcrMatch(detectedTexts, cameraPose)
+                }
+                .addOnFailureListener {
+                    image.close()
+                    isOcrProcessing = false
+                }
+        } catch (e: Exception) {
+            isOcrProcessing = false
+        }
+    }
+
+    private fun checkOcrMatch(detectedTexts: List<String>, cameraPose: Pose) {
+        val graph = floorGraph ?: return
+        val namedWaypoints = graph.getNamedWaypoints()
+
+        for (text in detectedTexts) {
+            val match = namedWaypoints.find { it.name.uppercase() == text || text.contains(it.name.uppercase()) }
+            if (match != null) {
+                runOnUiThread {
+                    binding.tvOcrStatus.text = "OCR Match: ${match.name}"
+                }
+                val localPos = listOf(cameraPose.tx(), cameraPose.ty(), cameraPose.tz())
+                val mapPos = match.position.map { it.toFloat() }
+                completePositionRecognition(match.name, mapPos, localPos)
+                break
             }
         }
     }
 
-    private fun updateNavigation(currentPosition: List<Float>) {
+    private fun updateNavigation(mappedPosition: List<Float>) {
         val path = currentPath ?: return
         if (!isNavigating || currentWaypointIndex >= path.nodes.size) return
 
         val targetNode = path.nodes[currentWaypointIndex]
-        val distance = floorGraph!!.calculateDistanceFromFloat(currentPosition, targetNode.position)
+        val distance = floorGraph!!.calculateDistanceFromFloat(mappedPosition, targetNode.position)
 
         runOnUiThread {
             binding.tvDirection.text = String.format("%.1f m to next point", distance)
@@ -312,7 +387,7 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
         }
     }
 
-    // NEW: Generate continuous arrow positions along the path
+    // Generate continuous arrow positions along the path (Map Coordinates)
     private fun generateContinuousArrows(path: List<GraphNode>): List<ArrowPosition> {
         val arrows = mutableListOf<ArrowPosition>()
 
@@ -336,10 +411,8 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
 
             if (segmentLength < 0.1f) continue
 
-            // Calculate angle for arrow rotation
             val angleY = Math.toDegrees(atan2(dx.toDouble(), dz.toDouble())).toFloat()
 
-            // Calculate number of arrows based on spacing
             var distance = 0f
             while (distance < segmentLength) {
                 val t = distance / segmentLength
@@ -354,7 +427,6 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
             }
         }
 
-        Log.d(TAG, "Generated ${arrows.size} arrows for path")
         return arrows
     }
 
@@ -476,15 +548,33 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
 
             if (camera.trackingState != TrackingState.TRACKING) return
 
+            // OCR Auto-Recognition
+            if (!isPositionRecognized) {
+                runAutoOcr(frame)
+            }
+
             val viewMatrix = FloatArray(16)
             val projectionMatrix = FloatArray(16)
             camera.getViewMatrix(viewMatrix, 0)
             camera.getProjectionMatrix(projectionMatrix, 0, 0.1f, 100f)
 
-            val cameraPos = listOf(camera.pose.tx(), camera.pose.ty(), camera.pose.tz())
+            val cameraPosLocal = listOf(camera.pose.tx(), camera.pose.ty(), camera.pose.tz())
+
+            // Map local AR coordinates to stored Map coordinates
+            val mappedUserPos = if (isOffsetInitialized) {
+                listOf(
+                    cameraPosLocal[0] - coordinateOffset[0],
+                    cameraPosLocal[1] - coordinateOffset[1],
+                    cameraPosLocal[2] - coordinateOffset[2]
+                )
+            } else {
+                cameraPosLocal
+            }
+            
+            userCurrentPosition = mappedUserPos
 
             if (!isPositionRecognized) {
-                recognizeUserPosition(cameraPos)
+                recognizeUserPosition(cameraPosLocal)
             }
 
             if (pendingDestination != null) {
@@ -492,21 +582,22 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
             }
 
             if (isNavigating && currentPath != null) {
-                updateNavigation(cameraPos)
+                updateNavigation(mappedUserPos)
 
                 val path = currentPath!!
-
-                // Generate and draw continuous arrows from current waypoint to destination
                 val remainingPath = path.nodes.drop(currentWaypointIndex)
                 val arrows = generateContinuousArrows(remainingPath)
 
-                Log.d(TAG, "Drawing ${arrows.size} arrows, current waypoint: $currentWaypointIndex/${path.nodes.size}")
-
                 arrowModel?.let { arrow ->
                     for (arrowPos in arrows) {
+                        // Translate map-coordinate arrows to local-coordinate space for rendering
+                        val lx = arrowPos.x + coordinateOffset[0]
+                        val ly = arrowPos.y + coordinateOffset[1]
+                        val lz = arrowPos.z + coordinateOffset[2]
+
                         val modelMatrix = FloatArray(16)
                         Matrix.setIdentityM(modelMatrix, 0)
-                        Matrix.translateM(modelMatrix, 0, arrowPos.x, arrowPos.y, arrowPos.z)
+                        Matrix.translateM(modelMatrix, 0, lx, ly, lz)
                         Matrix.rotateM(modelMatrix, 0, arrowPos.rotation, 0f, 1f, 0f)
                         Matrix.scaleM(modelMatrix, 0, 0.35f, 0.35f, 0.35f)
 
@@ -519,25 +610,24 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
                     }
                 }
 
-                // Draw destination marker
+                // Draw destination marker (Translated to Local)
                 renderer?.let { r ->
                     val destNode = path.nodes.last()
                     val pos = destNode.toFloatArray()
-                    r.draw(viewMatrix, projectionMatrix, pos[0], pos[1], pos[2], destinationColor)
+                    val lx = pos[0] + coordinateOffset[0]
+                    val ly = pos[1] + coordinateOffset[1]
+                    val lz = pos[2] + coordinateOffset[2]
+                    r.draw(viewMatrix, projectionMatrix, lx, ly, lz, destinationColor)
                 }
             } else {
                 // Show avatar when not navigating
-                val avatarX = cameraPos[0] - (camera.pose.zAxis[0] * 2.0f)
-                val avatarY = cameraPos[1] - 1.5f
-                val avatarZ = cameraPos[2] - (camera.pose.zAxis[2] * 2.0f)
-                avatarRenderer?.draw(viewMatrix, projectionMatrix, avatarX, avatarY, avatarZ)
+                avatarRenderer?.draw(viewMatrix, projectionMatrix, cameraPosLocal[0] - (camera.pose.zAxis[0] * 2.0f), cameraPosLocal[1] - 1.5f, cameraPosLocal[2] - (camera.pose.zAxis[2] * 2.0f))
             }
         } catch (e: Exception) {
             Log.e(TAG, "Error in onDrawFrame", e)
         }
     }
 
-    // Helper data class for arrow positions
     data class ArrowPosition(
         val x: Float,
         val y: Float,
