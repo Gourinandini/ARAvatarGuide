@@ -83,6 +83,8 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
         private const val WAYPOINT_REACHED_DISTANCE = 0.8f
         private const val ARROW_SPACING = 0.8f // Distance between arrows (meters)
         private const val ARROW_HEIGHT_OFFSET = 0.1f // Height above ground
+        private const val MAX_VISIBLE_ARROWS = 7 // Only show 7 arrows ahead
+        private const val MAX_ARROW_DISTANCE = 6.0f // Maximum distance to show arrows (meters)
         private const val TAG = "VisitorActivity"
     }
 
@@ -245,13 +247,26 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
         val finder = pathFinder ?: return
 
         try {
-            Log.d(TAG, "Finding path from $currentPos to $destName")
+            Log.d(TAG, "🗺️ Finding path to $destName")
+            Log.d(TAG, "   User Position (Map Coords): [${currentPos[0]}, ${currentPos[1]}, ${currentPos[2]}]")
+
             val pathResult = finder.findPathToDestination(currentPos, destName)
 
             if (pathResult != null) {
                 currentPath = pathResult
                 currentWaypointIndex = 0
-                Log.d(TAG, "Path found with ${pathResult.nodes.size} waypoints, distance: ${pathResult.totalDistance}m")
+
+                // Log complete path for debugging
+                Log.d(TAG, "✅ Path found with ${pathResult.nodes.size} waypoints, total distance: ${pathResult.totalDistance}m")
+                pathResult.nodes.forEachIndexed { index, node ->
+                    val marker = when {
+                        index == 0 -> "START"
+                        index == pathResult.nodes.size - 1 -> "END"
+                        node.isNamedWaypoint -> "NAMED"
+                        else -> "waypoint"
+                    }
+                    Log.d(TAG, "   [$index] $marker: ${node.name.ifEmpty { "(unnamed)" }} at [${node.position[0]}, ${node.position[1]}, ${node.position[2]}]")
+                }
 
                 runOnUiThread {
                     binding.tvDestination.text = "→ $destName"
@@ -261,12 +276,18 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
                 }
                 speak("Starting navigation to $destName. Follow the arrows.")
             } else {
-                Log.w(TAG, "No path found to $destName")
+                Log.w(TAG, "❌ No path found to $destName")
+                Log.w(TAG, "   Check if destination exists and is connected to other waypoints")
                 speak("Sorry, I couldn't find a path to $destName")
                 isNavigating = false
+
+                runOnUiThread {
+                    binding.tvStatus.text = "No path to $destName"
+                }
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Error starting navigation", e)
+            Log.e(TAG, "❌ Error starting navigation", e)
+            e.printStackTrace()
             speak("Error starting navigation")
             isNavigating = false
         }
@@ -292,16 +313,20 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
         coordinateOffset[1] = localPosition[1] - mapPosition[1]
         coordinateOffset[2] = localPosition[2] - mapPosition[2]
         isOffsetInitialized = true
-        
+
         isPositionRecognized = true
         userCurrentPosition = mapPosition
-        
-        Log.d(TAG, "Position recognized near: $locationName. Offset set: [${coordinateOffset[0]}, ${coordinateOffset[1]}, ${coordinateOffset[2]}]")
+
+        Log.d(TAG, "✅ Position recognized: $locationName")
+        Log.d(TAG, "   Local Position: [${localPosition[0]}, ${localPosition[1]}, ${localPosition[2]}]")
+        Log.d(TAG, "   Map Position: [${mapPosition[0]}, ${mapPosition[1]}, ${mapPosition[2]}]")
+        Log.d(TAG, "   Coordinate Offset: [${coordinateOffset[0]}, ${coordinateOffset[1]}, ${coordinateOffset[2]}]")
 
         runOnUiThread {
-            binding.tvStatus.text = "Position recognized near $locationName"
+            binding.tvStatus.text = "Position: $locationName"
+            binding.tvOcrStatus.text = "Recognized: $locationName ✓"
             binding.btnMicrophone.isEnabled = true
-            Toast.makeText(this, "✅ Position recognized: $locationName", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "✅ Position: $locationName", Toast.LENGTH_SHORT).show()
         }
 
         if (isTtsReady && !hasAskedInitialQuestion && pendingDestination == null) {
@@ -343,9 +368,26 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
         val graph = floorGraph ?: return
         val namedWaypoints = graph.getNamedWaypoints()
 
+        Log.d(TAG, "🔍 OCR detected ${detectedTexts.size} text blocks: ${detectedTexts.joinToString(", ")}")
+
         for (text in detectedTexts) {
-            val match = namedWaypoints.find { it.name.uppercase() == text || text.contains(it.name.uppercase()) }
+            // Clean up the detected text
+            val cleanText = text.trim().uppercase()
+            if (cleanText.length < 3) continue // Ignore very short matches (noise)
+
+            // Try exact match first
+            var match = namedWaypoints.find { it.name.uppercase() == cleanText }
+
+            // If no exact match, try partial match (but only if text is reasonably long)
+            if (match == null && cleanText.length >= 5) {
+                match = namedWaypoints.find { waypoint ->
+                    val waypointName = waypoint.name.uppercase()
+                    waypointName.contains(cleanText) || cleanText.contains(waypointName)
+                }
+            }
+
             if (match != null) {
+                Log.d(TAG, "✅ OCR Match found: '${match.name}' from detected text: '$cleanText'")
                 runOnUiThread {
                     binding.tvOcrStatus.text = "OCR Match: ${match.name}"
                 }
@@ -388,10 +430,14 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
     }
 
     // Generate continuous arrow positions along the path (Map Coordinates)
-    private fun generateContinuousArrows(path: List<GraphNode>): List<ArrowPosition> {
+    // Only shows arrows within MAX_ARROW_DISTANCE from user and up to MAX_VISIBLE_ARROWS
+    private fun generateContinuousArrows(path: List<GraphNode>, userPosition: List<Float>): List<ArrowPosition> {
         val arrows = mutableListOf<ArrowPosition>()
+        var arrowCount = 0
 
         for (i in 0 until path.size - 1) {
+            if (arrowCount >= MAX_VISIBLE_ARROWS) break // Stop after showing enough arrows
+
             val start = path[i]
             val end = path[i + 1]
 
@@ -414,17 +460,36 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
             val angleY = Math.toDegrees(atan2(dx.toDouble(), dz.toDouble())).toFloat()
 
             var distance = 0f
-            while (distance < segmentLength) {
+            while (distance < segmentLength && arrowCount < MAX_VISIBLE_ARROWS) {
                 val t = distance / segmentLength
 
                 val arrowX = startX + dx * t
                 val arrowY = startY + dy * t + ARROW_HEIGHT_OFFSET
                 val arrowZ = startZ + dz * t
 
-                arrows.add(ArrowPosition(arrowX, arrowY, arrowZ, angleY))
+                // Calculate distance from user to this arrow (in map coordinates)
+                val distToUser = sqrt(
+                    (arrowX - userPosition[0]) * (arrowX - userPosition[0]) +
+                            (arrowY - userPosition[1]) * (arrowY - userPosition[1]) +
+                            (arrowZ - userPosition[2]) * (arrowZ - userPosition[2])
+                )
+
+                // Only add arrow if it's within visible distance
+                if (distToUser <= MAX_ARROW_DISTANCE) {
+                    arrows.add(ArrowPosition(arrowX, arrowY, arrowZ, angleY))
+                    arrowCount++
+
+                    if (arrowCount == 1) {
+                        Log.v(TAG, "🎯 First arrow at distance ${String.format("%.2f", distToUser)}m from user")
+                    }
+                }
 
                 distance += ARROW_SPACING
             }
+        }
+
+        if (arrows.size > 0) {
+            Log.v(TAG, "📍 Showing ${arrows.size} arrows (max: $MAX_VISIBLE_ARROWS, max distance: ${MAX_ARROW_DISTANCE}m)")
         }
 
         return arrows
@@ -570,7 +635,7 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
             } else {
                 cameraPosLocal
             }
-            
+
             userCurrentPosition = mappedUserPos
 
             if (!isPositionRecognized) {
@@ -586,7 +651,7 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
 
                 val path = currentPath!!
                 val remainingPath = path.nodes.drop(currentWaypointIndex)
-                val arrows = generateContinuousArrows(remainingPath)
+                val arrows = generateContinuousArrows(remainingPath, mappedUserPos)
 
                 arrowModel?.let { arrow ->
                     for (arrowPos in arrows) {

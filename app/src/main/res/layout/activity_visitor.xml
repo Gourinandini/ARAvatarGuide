@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+<androidx.constraintlayout.widget.ConstraintLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
     xmlns:tools="http://schemas.android.com/tools"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
@@ -7,112 +8,136 @@
 
     <android.opengl.GLSurfaceView
         android:id="@+id/surfaceView"
+        android:layout_width="0dp"
+        android:layout_height="0dp"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toTopOf="parent" />
+
+    <!-- Top Bar Container -->
+    <LinearLayout
+        android:id="@+id/topBar"
         android:layout_width="match_parent"
-        android:layout_height="match_parent" />
-
-    <Button
-        android:id="@+id/btnMap"
-        android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:text="Map"
-        android:layout_gravity="top|end"
-        android:layout_margin="16dp" />
+        android:orientation="horizontal"
+        android:padding="16dp"
+        android:gravity="center_vertical"
+        app:layout_constraintTop_toTopOf="parent">
 
-    <FrameLayout
-        android:id="@+id/avatarContainer"
-        android:layout_width="120dp"
-        android:layout_height="120dp"
-        android:layout_gravity="bottom|end"
-        android:layout_margin="16dp">
+        <TextView
+            android:id="@+id/tvOcrStatus"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="OCR Scanning..."
+            android:textColor="#00E676"
+            android:textSize="14sp"
+            android:background="#80000000"
+            android:padding="8dp" />
 
-        <!-- Avatar will be rendered here -->
-
-    </FrameLayout>
+        <Button
+            android:id="@+id/btnMap"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Map"
+            android:layout_marginStart="8dp" />
+    </LinearLayout>
 
     <TextView
         android:id="@+id/tvStatus"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:layout_gravity="top|center_horizontal"
-        android:layout_marginTop="16dp"
+        android:layout_marginTop="8dp"
+        android:background="#80000000"
+        android:padding="8dp"
         android:textColor="@android:color/white"
         android:textSize="16sp"
-        android:background="#80000000"
-        android:padding="8dp"/>
-
-    <!-- OCR Auto-Detection Status Overlay -->
-    <TextView
-        android:id="@+id/tvOcrStatus"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_gravity="top|start"
-        android:layout_margin="16dp"
-        android:textColor="#00E676"
-        android:textSize="14sp"
-        android:text="OCR Scanning..."
-        android:background="#80000000"
-        android:padding="8dp" />
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toBottomOf="@id/topBar" />
 
     <TextView
         android:id="@+id/tvDestination"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:layout_gravity="top|center_horizontal"
-        android:layout_marginTop="56dp"
+        android:layout_marginTop="8dp"
         android:textColor="#00FF00"
         android:textSize="18sp"
-        android:visibility="gone" />
+        android:visibility="gone"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toBottomOf="@id/tvStatus" />
 
-    <TextView
-        android:id="@+id/tvDirection"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_gravity="bottom|center_horizontal"
-        android:layout_marginBottom="150dp"
-        android:gravity="center"
-        android:textColor="#FFD700"
-        android:textSize="20sp"
-        android:textStyle="bold"
-        android:visibility="gone" />
-
+    <!-- Bottom Controls Container -->
     <LinearLayout
-        android:id="@+id/initialStateContainer"
+        android:id="@+id/bottomControls"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:orientation="vertical"
         android:gravity="center"
-        android:background="#A0000000"
-        android:padding="24dp"
-        android:layout_gravity="center" >
+        android:padding="16dp"
+        app:layout_constraintBottom_toBottomOf="parent">
 
-    <TextView
-        android:id="@+id/tvAvailableLocations"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:text="Loading locations..."
-        android:textColor="@android:color/white"
-        android:textSize="22sp"
-        android:gravity="center"
-        android:layout_marginBottom="24dp" />
+        <TextView
+            android:id="@+id/tvDirection"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="16dp"
+            android:gravity="center"
+            android:textStyle="bold"
+            android:textColor="#FFD700"
+            android:textSize="20sp"
+            android:visibility="gone" />
 
-    <TextView
-        android:id="@+id/tvSpeechInput"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:text="Tap microphone to ask for directions"
-        android:textColor="#CCCCCC"
-        android:textSize="18sp"
-        android:gravity="center"
-        android:padding="8dp" />
+        <!-- Initial State / Microphone Container -->
+        <LinearLayout
+            android:id="@+id/initialStateContainer"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:gravity="center"
+            android:background="#A0000000"
+            android:padding="16dp">
 
-    <Button
-        android:id="@+id/btnMicrophone"
-        android:layout_width="80dp"
-        android:layout_height="80dp"
-        android:layout_gravity="center"
-        android:text="🎤"
-        android:textSize="32sp"
-        android:layout_marginTop="8dp" />
+            <TextView
+                android:id="@+id/tvAvailableLocations"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Loading locations..."
+                android:textColor="@android:color/white"
+                android:textSize="16sp"
+                android:gravity="center"
+                android:maxLines="4"
+                android:ellipsize="end"
+                android:layout_marginBottom="16dp" />
+
+            <TextView
+                android:id="@+id/tvSpeechInput"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Tap microphone to ask for directions"
+                android:textColor="#CCCCCC"
+                android:textSize="16sp"
+                android:gravity="center"
+                android:padding="4dp" />
+
+            <Button
+                android:id="@+id/btnMicrophone"
+                android:layout_width="64dp"
+                android:layout_height="64dp"
+                android:text="🎤"
+                android:textSize="24sp"
+                android:layout_marginTop="8dp" />
+        </LinearLayout>
     </LinearLayout>
 
-</FrameLayout>
+    <!-- Avatar Placeholder (Hidden in AR view usually, but kept for structure if needed) -->
+    <FrameLayout
+        android:id="@+id/avatarContainer"
+        android:layout_width="1dp"
+        android:layout_height="1dp"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintEnd_toEndOf="parent" />
+
+</androidx.constraintlayout.widget.ConstraintLayout>
