@@ -527,7 +527,14 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
 
     private fun speak(text: String) {
         if (isTtsReady) {
+            avatarRenderer?.isSpeaking = true
             textToSpeech?.speak(text, TextToSpeech.QUEUE_FLUSH, null, null)
+            
+            // Stop speaking animation after estimated duration (rough estimate: 100ms per char)
+            val duration = (text.length * 100).toLong()
+            binding.surfaceView.postDelayed({
+                avatarRenderer?.isSpeaking = false
+            }, duration)
         }
         Log.d(TAG, "TTS: $text")
     }
