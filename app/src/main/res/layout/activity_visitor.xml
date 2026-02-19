@@ -21,7 +21,8 @@
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:orientation="horizontal"
-        android:padding="16dp"
+        android:paddingHorizontal="16dp"
+        android:paddingVertical="12dp"
         android:gravity="center_vertical"
         app:layout_constraintTop_toTopOf="parent">
 
@@ -31,39 +32,52 @@
             android:layout_height="wrap_content"
             android:layout_weight="1"
             android:text="OCR Scanning..."
-            android:textColor="#00E676"
-            android:textSize="14sp"
-            android:background="#80000000"
-            android:padding="8dp" />
+            android:textColor="@color/accent_green"
+            android:textSize="13sp"
+            android:background="@drawable/bg_glass_chip"
+            android:paddingHorizontal="14dp"
+            android:paddingVertical="8dp" />
 
         <Button
             android:id="@+id/btnMap"
             android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:text="Map"
-            android:layout_marginStart="8dp" />
+            android:layout_height="40dp"
+            android:text="🗺️ Map"
+            android:textSize="13sp"
+            android:textColor="@color/white"
+            android:textAllCaps="false"
+            android:background="@drawable/bg_btn_primary"
+            android:paddingHorizontal="18dp"
+            android:layout_marginStart="10dp" />
     </LinearLayout>
 
+    <!-- Status chip -->
     <TextView
         android:id="@+id/tvStatus"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:layout_marginTop="8dp"
-        android:background="#80000000"
-        android:padding="8dp"
-        android:textColor="@android:color/white"
-        android:textSize="16sp"
+        android:background="@drawable/bg_glass_chip"
+        android:paddingHorizontal="16dp"
+        android:paddingVertical="8dp"
+        android:textColor="@color/text_primary"
+        android:textSize="14sp"
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintTop_toBottomOf="@id/topBar" />
 
+    <!-- Destination chip -->
     <TextView
         android:id="@+id/tvDestination"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:layout_marginTop="8dp"
-        android:textColor="#00FF00"
-        android:textSize="18sp"
+        android:textColor="@color/accent_green"
+        android:textSize="16sp"
+        android:textStyle="bold"
+        android:background="@drawable/bg_glass_chip"
+        android:paddingHorizontal="16dp"
+        android:paddingVertical="8dp"
         android:visibility="gone"
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintStart_toStartOf="parent"
@@ -76,18 +90,23 @@
         android:layout_height="wrap_content"
         android:orientation="vertical"
         android:gravity="center"
-        android:padding="16dp"
+        android:paddingHorizontal="16dp"
+        android:paddingBottom="20dp"
         app:layout_constraintBottom_toBottomOf="parent">
 
+        <!-- Direction text -->
         <TextView
             android:id="@+id/tvDirection"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:layout_marginBottom="16dp"
+            android:layout_marginBottom="14dp"
             android:gravity="center"
             android:textStyle="bold"
-            android:textColor="#FFD700"
-            android:textSize="20sp"
+            android:textColor="@color/accent_gold"
+            android:textSize="18sp"
+            android:background="@drawable/bg_glass_chip"
+            android:paddingHorizontal="20dp"
+            android:paddingVertical="10dp"
             android:visibility="gone" />
 
         <!-- Initial State / Microphone Container -->
@@ -97,16 +116,18 @@
             android:layout_height="wrap_content"
             android:orientation="vertical"
             android:gravity="center"
-            android:background="#A0000000"
-            android:padding="16dp">
+            android:background="@drawable/bg_bottom_panel"
+            android:paddingHorizontal="20dp"
+            android:paddingTop="24dp"
+            android:paddingBottom="20dp">
 
             <TextView
                 android:id="@+id/tvAvailableLocations"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:text="Loading locations..."
-                android:textColor="@android:color/white"
-                android:textSize="16sp"
+                android:textColor="@color/text_secondary"
+                android:textSize="14sp"
                 android:gravity="center"
                 android:maxLines="4"
                 android:ellipsize="end"
@@ -117,8 +138,8 @@
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:text="Tap microphone to ask for directions"
-                android:textColor="#CCCCCC"
-                android:textSize="16sp"
+                android:textColor="@color/text_hint"
+                android:textSize="14sp"
                 android:gravity="center"
                 android:padding="4dp" />
 
@@ -128,11 +149,13 @@
                 android:layout_height="64dp"
                 android:text="🎤"
                 android:textSize="24sp"
-                android:layout_marginTop="8dp" />
+                android:background="@drawable/bg_mic_button"
+                android:layout_marginTop="12dp"
+                android:elevation="8dp" />
         </LinearLayout>
     </LinearLayout>
 
-    <!-- Avatar Placeholder (Hidden in AR view usually, but kept for structure if needed) -->
+    <!-- Avatar Placeholder -->
     <FrameLayout
         android:id="@+id/avatarContainer"
         android:layout_width="1dp"

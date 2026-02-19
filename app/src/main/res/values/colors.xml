@@ -1,5 +1,42 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <!-- Brand Colors -->
+    <color name="primary">#FF00BCD4</color>
+    <color name="primary_dark">#FF0097A7</color>
+    <color name="primary_light">#FF4DD0E1</color>
+    <color name="accent">#FF00E5FF</color>
+    <color name="accent_green">#FF00E676</color>
+    <color name="accent_gold">#FFFFD740</color>
+
+    <!-- Surfaces / Backgrounds -->
+    <color name="bg_dark">#FF0D1117</color>
+    <color name="bg_card">#FF161B22</color>
+    <color name="bg_elevated">#FF1C2333</color>
+    <color name="bg_glass">#B3000000</color>
+    <color name="bg_glass_light">#80000000</color>
+    <color name="bg_input">#FF21262D</color>
+
+    <!-- Text -->
+    <color name="text_primary">#FFFFFFFF</color>
+    <color name="text_secondary">#FFB0B8C4</color>
+    <color name="text_hint">#FF6E7681</color>
+
+    <!-- Status Colors -->
+    <color name="success">#FF00E676</color>
+    <color name="warning">#FFFFD740</color>
+    <color name="error">#FFFF5252</color>
+    <color name="restricted">#FFD500F9</color>
+    <color name="emergency">#FFFF1744</color>
+
+    <!-- Button Colors -->
+    <color name="btn_primary">#FF00BCD4</color>
+    <color name="btn_danger">#FFFF1744</color>
+    <color name="btn_ocr">#FF448AFF</color>
+
+    <!-- Divider -->
+    <color name="divider">#FF30363D</color>
+
+    <!-- Legacy compat -->
     <color name="purple_200">#FFBB86FC</color>
     <color name="purple_500">#FF6200EE</color>
     <color name="purple_700">#FF3700B3</color>

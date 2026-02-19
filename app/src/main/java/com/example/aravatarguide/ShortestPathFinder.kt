@@ -39,7 +39,8 @@ class ShortestPathFinder(private val graph: FloorGraph) {
             }
 
             graph.getNeighborsOf(currentNode).forEach { neighbor ->
-                if (neighbor.id !in visited) {
+                // Skip restricted areas — never route through them
+                if (neighbor.id !in visited && !neighbor.isRestrictedArea) {
                     val edgeWeight = graph.calculateDistance(currentNode.position, neighbor.position)
                     val newDist = currentDist + edgeWeight
 

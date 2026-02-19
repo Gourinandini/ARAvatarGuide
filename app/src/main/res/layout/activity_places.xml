@@ -4,27 +4,57 @@
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:orientation="vertical"
+    android:background="@drawable/bg_gradient_dark"
     android:gravity="center_horizontal"
+    android:paddingHorizontal="32dp"
     tools:context=".PlacesActivity">
+
+    <!-- Header -->
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="📍"
+        android:textSize="48sp"
+        android:layout_marginTop="60dp" />
 
     <TextView
         android:id="@+id/tvBuildingName"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:textSize="24sp"
-        android:layout_marginTop="16dp" />
+        android:textSize="26sp"
+        android:textStyle="bold"
+        android:textColor="@color/text_primary"
+        android:layout_marginTop="12dp" />
 
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="Select a destination"
+        android:textSize="14sp"
+        android:textColor="@color/text_secondary"
+        android:layout_marginTop="6dp"
+        android:layout_marginBottom="48dp" />
+
+    <!-- Place Buttons -->
     <Button
         android:id="@+id/btnPrincipalOffice"
-        android:layout_width="200dp"
-        android:layout_height="wrap_content"
-        android:text="Principal Office - 1st floor"
-        android:layout_marginTop="16dp" />
+        android:layout_width="match_parent"
+        android:layout_height="60dp"
+        android:text="🏫  Principal Office — 1st Floor"
+        android:textSize="15sp"
+        android:textColor="@color/white"
+        android:textAllCaps="false"
+        android:background="@drawable/bg_btn_primary" />
 
     <Button
         android:id="@+id/btnAPJHall"
-        android:layout_width="200dp"
-        android:layout_height="wrap_content"
-        android:text="APJ Hall - 3rd floor" />
+        android:layout_width="match_parent"
+        android:layout_height="60dp"
+        android:text="🎓  APJ Hall — 3rd Floor"
+        android:textSize="15sp"
+        android:textColor="@color/text_primary"
+        android:textAllCaps="false"
+        android:background="@drawable/bg_btn_outline"
+        android:layout_marginTop="16dp" />
 
 </LinearLayout>

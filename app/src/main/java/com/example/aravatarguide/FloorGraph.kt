@@ -10,7 +10,8 @@ data class GraphNode(
     var name: String = "",
     var position: List<Double> = emptyList(),
     var isNamedWaypoint: Boolean = false,
-    var isEmergencyExit: Boolean = false
+    var isEmergencyExit: Boolean = false,
+    var isRestrictedArea: Boolean = false
 ) {
     @Exclude
     fun toFloatArray(): FloatArray {
@@ -66,6 +67,11 @@ class FloorGraph() {
     @Exclude
     fun getEmergencyExits(): List<GraphNode> {
         return nodes.values.filter { it.isEmergencyExit }
+    }
+
+    @Exclude
+    fun getRestrictedAreas(): List<GraphNode> {
+        return nodes.values.filter { it.isRestrictedArea }
     }
 
     // Main distance calculation for Double positions

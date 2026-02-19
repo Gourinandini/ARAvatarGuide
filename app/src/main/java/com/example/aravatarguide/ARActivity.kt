@@ -57,10 +57,12 @@ class ARActivity : AppCompatActivity(), GLSurfaceView.Renderer {
     private val pathRecorder = PathRecorder()
     private var pendingWaypointName: String? = null
     private var isEmergencyExit: Boolean = false
+    private var isRestrictedArea: Boolean = false
 
     private val waypointColor = floatArrayOf(0.0f, 1.0f, 0.0f, 1.0f) // Green
     private val namedWaypointColor = floatArrayOf(1.0f, 0.84f, 0.0f, 1.0f) // Gold
     private val emergencyExitColor = floatArrayOf(1.0f, 0.0f, 0.0f, 1.0f) // Red
+    private val restrictedAreaColor = floatArrayOf(0.6f, 0.0f, 0.8f, 1.0f) // Purple
 
     private lateinit var database: FirebaseDatabase
     private lateinit var firebasePathManager: FirebasePathManager
@@ -119,6 +121,37 @@ class ARActivity : AppCompatActivity(), GLSurfaceView.Renderer {
         }
 
         listenAndSetEmergencyState()
+        listenForRestrictedAreaBreaches()
+    }
+
+    /**
+     * Listen for real-time alerts when a visitor enters a restricted area.
+     * Shows a Toast + audible alert to the host.
+     */
+    private fun listenForRestrictedAreaBreaches() {
+        database.getReference("restrictedAreaBreach").addValueEventListener(object : ValueEventListener {
+            override fun onDataChange(snapshot: DataSnapshot) {
+                val isActive = snapshot.child("active").getValue(Boolean::class.java) ?: false
+                if (isActive) {
+                    val areaName = snapshot.child("areaName").getValue(String::class.java) ?: "Unknown"
+                    runOnUiThread {
+                        AlertDialog.Builder(this@ARActivity)
+                            .setTitle("⛔ RESTRICTED AREA BREACH")
+                            .setMessage("A visitor has entered the restricted area: $areaName\n\nPlease take necessary action.")
+                            .setPositiveButton("Acknowledge") { _, _ ->
+                                // Clear the breach flag
+                                database.getReference("restrictedAreaBreach/active").setValue(false)
+                            }
+                            .setCancelable(false)
+                            .show()
+                    }
+                    Log.w(TAG, "⛔ ALERT: Visitor entered restricted area: $areaName")
+                }
+            }
+            override fun onCancelled(error: DatabaseError) {
+                Log.e(TAG, "Restricted area listener cancelled: ${error.message}")
+            }
+        })
     }
 
     private fun listenAndSetEmergencyState() {
@@ -182,6 +215,7 @@ class ARActivity : AppCompatActivity(), GLSurfaceView.Renderer {
         val dialogView = layoutInflater.inflate(R.layout.dialog_name_waypoint, null)
         val editTextName = dialogView.findViewById<EditText>(R.id.etWaypointName)
         val cbEmergencyExit = dialogView.findViewById<CheckBox>(R.id.cbEmergencyExit)
+        val cbRestrictedArea = dialogView.findViewById<CheckBox>(R.id.cbRestrictedArea)
 
         AlertDialog.Builder(this)
             .setTitle("Name This Waypoint")
@@ -190,6 +224,7 @@ class ARActivity : AppCompatActivity(), GLSurfaceView.Renderer {
             .setPositiveButton("Mark") { _, _ ->
                 val name = editTextName.text.toString().trim()
                 isEmergencyExit = cbEmergencyExit.isChecked
+                isRestrictedArea = cbRestrictedArea.isChecked
                 markCurrentPositionAsWaypoint(name)
             }
             .setNegativeButton("Cancel", null)
@@ -351,10 +386,15 @@ class ARActivity : AppCompatActivity(), GLSurfaceView.Renderer {
             if (pathRecorder.isCurrentlyRecording()) {
                 val pendingName = pendingWaypointName
                 if (pendingName != null) {
-                    val success = pathRecorder.markNamedWaypoint(camera.pose, pendingName, isEmergencyExit)
+                    val success = pathRecorder.markNamedWaypoint(camera.pose, pendingName, isEmergencyExit, isRestrictedArea)
                     runOnUiThread {
                         if (success) {
-                            Toast.makeText(this@ARActivity, "✅ '$pendingName' marked!", Toast.LENGTH_SHORT).show()
+                            val marker = when {
+                                isRestrictedArea -> "⛔ Restricted"
+                                isEmergencyExit -> "🚨 Emergency Exit"
+                                else -> "📌"
+                            }
+                            Toast.makeText(this@ARActivity, "✅ $marker '$pendingName' marked!", Toast.LENGTH_SHORT).show()
                             updateWaypointCount()
                         } else {
                             Toast.makeText(this@ARActivity, "❌ Name already exists", Toast.LENGTH_SHORT).show()
@@ -362,6 +402,7 @@ class ARActivity : AppCompatActivity(), GLSurfaceView.Renderer {
                     }
                     pendingWaypointName = null
                     isEmergencyExit = false
+                    isRestrictedArea = false
                 } else {
                     if (pathRecorder.updatePosition(camera.pose)) {
                         runOnUiThread { updateWaypointCount() }
@@ -377,6 +418,7 @@ class ARActivity : AppCompatActivity(), GLSurfaceView.Renderer {
             renderer?.let { r ->
                 pathRecorder.getRecordedPoints().forEach { node ->
                     val color = when {
+                        node.isRestrictedArea -> restrictedAreaColor
                         node.isEmergencyExit -> emergencyExitColor
                         node.isNamedWaypoint -> namedWaypointColor
                         else -> waypointColor

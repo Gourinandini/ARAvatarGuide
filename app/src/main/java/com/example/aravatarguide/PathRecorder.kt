@@ -66,7 +66,7 @@ class PathRecorder {
         return false
     }
 
-    fun markNamedWaypoint(pose: Pose, name: String, isEmergencyExit: Boolean): Boolean {
+    fun markNamedWaypoint(pose: Pose, name: String, isEmergencyExit: Boolean, isRestrictedArea: Boolean = false): Boolean {
         if (name.isBlank()) return false
 
         if (floorGraph.getNamedWaypoints().any { it.name.equals(name, ignoreCase = true) }) {
@@ -81,7 +81,8 @@ class PathRecorder {
             name = name,
             position = position,
             isNamedWaypoint = true,
-            isEmergencyExit = isEmergencyExit
+            isEmergencyExit = isEmergencyExit,
+            isRestrictedArea = isRestrictedArea
         )
 
         floorGraph.addNode(node)

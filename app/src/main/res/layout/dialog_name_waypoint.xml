@@ -3,35 +3,65 @@
     android:layout_width="match_parent"
     android:layout_height="wrap_content"
     android:orientation="vertical"
-    android:padding="16dp">
+    android:background="@color/bg_card"
+    android:padding="24dp">
 
     <TextView
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:text="Enter a descriptive name for this location:"
-        android:textSize="14sp"
-        android:layout_marginBottom="12dp" />
+        android:text="📍 Name this Location"
+        android:textSize="18sp"
+        android:textStyle="bold"
+        android:textColor="@color/text_primary"
+        android:layout_marginBottom="4dp" />
+
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Enter a descriptive name for this waypoint"
+        android:textSize="13sp"
+        android:textColor="@color/text_secondary"
+        android:layout_marginBottom="16dp" />
 
     <EditText
         android:id="@+id/etWaypointName"
         android:layout_width="match_parent"
-        android:layout_height="wrap_content"
+        android:layout_height="48dp"
         android:hint="e.g., Library, Main Gate, Cafeteria"
         android:inputType="textCapWords"
-        android:maxLines="1" />
+        android:maxLines="1"
+        android:background="@drawable/bg_input"
+        android:paddingHorizontal="16dp"
+        android:textColor="@color/text_primary"
+        android:textColorHint="@color/text_hint"
+        android:textSize="14sp" />
 
     <CheckBox
         android:id="@+id/cbEmergencyExit"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:text="Mark as Emergency Exit" />
+        android:text="🚪 Mark as Emergency Exit"
+        android:textColor="@color/text_secondary"
+        android:textSize="14sp"
+        android:layout_marginTop="16dp"
+        android:buttonTint="@color/accent_green" />
+
+    <CheckBox
+        android:id="@+id/cbRestrictedArea"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="⛔ Mark as Restricted Area"
+        android:textColor="@color/restricted"
+        android:textSize="14sp"
+        android:layout_marginTop="8dp"
+        android:buttonTint="@color/restricted" />
 
     <TextView
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginTop="8dp"
+        android:layout_marginTop="14dp"
         android:text="Examples: Library, CIDRIE Lab, Main Entrance, Cafeteria, Parking Lot"
-        android:textSize="12sp"
-        android:textColor="#666666" />
+        android:textSize="11sp"
+        android:textColor="@color/text_hint" />
 
 </LinearLayout>

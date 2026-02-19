@@ -28,10 +28,16 @@ import com.google.firebase.database.ValueEventListener
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import java.util.*
 import javax.microedition.khronos.egl.EGLConfig
 import javax.microedition.khronos.opengles.GL10
+import kotlin.math.abs
 import kotlin.math.atan2
+import kotlin.math.cos
+import kotlin.math.sin
 import kotlin.math.sqrt
 
 class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeech.OnInitListener {
@@ -64,9 +70,15 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
 
     private val destinationColor = floatArrayOf(1.0f, 0.0f, 0.0f, 1.0f)
     private val arrowColor = floatArrayOf(0.0f, 0.5f, 1.0f, 1.0f) // Blue arrows
+    private val restrictedColor = floatArrayOf(0.6f, 0.0f, 0.8f, 1.0f) // Purple for restricted zones
 
     private lateinit var database: FirebaseDatabase
     private lateinit var firebasePathManager: FirebasePathManager
+
+    // Restricted area detection
+    private var lastRestrictedAlertTime = 0L
+    private val RESTRICTED_ALERT_COOLDOWN_MS = 8000L // Don't spam alerts
+    private var lastAlertedRestrictedNodeId: String? = null
 
     // OCR components
     private val textRecognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
@@ -74,17 +86,25 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
     private val OCR_INTERVAL_MS = 2000L // Run OCR every 2 seconds
     private var isOcrProcessing = false
 
-    // Coordinate Mapping: Offset = Local AR Coords - Map/Saved Coords
-    private var coordinateOffset = floatArrayOf(0f, 0f, 0f)
-    private var isOffsetInitialized = false
+    // Coordinate Calibration: Translation + Rotation mapping between AR spaces
+    private var calibrationLocalPos: FloatArray? = null  // Visitor's AR position at calibration point
+    private var calibrationMapPos: FloatArray? = null     // Host's map position at calibration point
+    private var calibrationNodeId: String? = null          // Graph node matched at calibration point
+    private var yawOffset: Float = 0f                      // Rotation offset (radians): local to map
+    private var isCalibrated = false                       // Full calibration with rotation complete
+
+    // Groq AI (Free Llama 3.3 70B)
+    private lateinit var chatHelper: GroqChatHelper
 
     companion object {
         private const val PERMISSION_CODE = 100
         private const val WAYPOINT_REACHED_DISTANCE = 0.8f
+        private const val CALIBRATION_MIN_DISTANCE = 0.7f // Min walk distance for rotation calibration
         private const val ARROW_SPACING = 0.8f // Distance between arrows (meters)
         private const val ARROW_HEIGHT_OFFSET = 0.1f // Height above ground
         private const val MAX_VISIBLE_ARROWS = 7 // Only show 7 arrows ahead
         private const val MAX_ARROW_DISTANCE = 6.0f // Maximum distance to show arrows (meters)
+        private const val RESTRICTED_AREA_ALERT_DISTANCE = 2.0f // Alert when within 2m of restricted area
         private const val TAG = "VisitorActivity"
     }
 
@@ -95,6 +115,15 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
 
         database = FirebaseDatabase.getInstance()
         firebasePathManager = FirebasePathManager()
+
+        // Initialize Groq AI (Free - Llama 3.3 70B)
+        val apiKey = BuildConfig.GROQ_API_KEY
+        if (apiKey.isBlank()) {
+            Toast.makeText(this, "⚠️ Groq API Key is missing in local.properties", Toast.LENGTH_LONG).show()
+        } else {
+            Log.d(TAG, "Groq API Key loaded (length: ${apiKey.length})")
+        }
+        chatHelper = GroqChatHelper(apiKey)
 
         binding.surfaceView.preserveEGLContextOnPause = true
         binding.surfaceView.setEGLContextClientVersion(2)
@@ -126,11 +155,13 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
                 floorGraph = graph
                 pathFinder = ShortestPathFinder(floorGraph!!)
                 val destinations = floorGraph!!.getNamedWaypoints().map { it.name }
+                chatHelper.setSystemPrompt(destinations)
 
                 runOnUiThread {
                     binding.initialStateContainer.visibility = View.VISIBLE
                     binding.tvAvailableLocations.text = "Available Locations:\n${destinations.joinToString("\n")}"
                     binding.tvStatus.text = "Map loaded! Looking for your position..."
+                    binding.btnMicrophone.isEnabled = true
                     Toast.makeText(this, "✅ Map loaded: ${destinations.size} locations", Toast.LENGTH_LONG).show()
                     Log.d(TAG, "Available locations: $destinations")
                 }
@@ -218,15 +249,59 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
         runOnUiThread { binding.tvSpeechInput.text = "You said: \"$command\"" }
         Log.d(TAG, "Processing voice command: $command")
 
+        // 1. Check for direct navigation commands first (simple keyword matching)
         val matchedWaypoint = floorGraph?.getNamedWaypoints()?.find {
-            command.contains(it.name, ignoreCase = true)
+            command.contains(it.name, ignoreCase = true) && 
+            (command.contains("go to", ignoreCase = true) || 
+             command.contains("navigate to", ignoreCase = true) ||
+             command.contains("take me to", ignoreCase = true) ||
+             command.contains("where is", ignoreCase = true))
         }
 
         if (matchedWaypoint != null) {
             Log.d(TAG, "Matched waypoint: ${matchedWaypoint.name}")
             startNavigation(matchedWaypoint.name)
-        } else {
-            speak("I couldn't find that location. Available locations are: ${floorGraph?.getNamedWaypoints()?.joinToString { it.name }}")
+            return
+        }
+
+        // 2. If not a direct navigation command, use Gemini for conversational AI
+        processConversationalCommand(command)
+    }
+
+    private fun processConversationalCommand(command: String) {
+        CoroutineScope(Dispatchers.IO).launch {
+            val result = chatHelper.chat(command)
+
+            when (result) {
+                is GroqChatHelper.ChatResult.Message -> {
+                    speak(result.text)
+                }
+                is GroqChatHelper.ChatResult.Navigation -> {
+                    val destination = result.destination
+                    // Verify destination exists
+                    val validDest = floorGraph?.getNamedWaypoints()?.find {
+                        it.name.equals(destination, ignoreCase = true)
+                    }
+
+                    if (validDest != null) {
+                        if (result.preText.isNotBlank()) {
+                            speak(result.preText)
+                        }
+                        runOnUiThread {
+                            startNavigation(validDest.name)
+                        }
+                    } else {
+                        speak("I understood you want to go to $destination, but I can't find it on the map.")
+                    }
+                }
+                is GroqChatHelper.ChatResult.Error -> {
+                    Log.e(TAG, "Groq AI Error: ${result.message}")
+                    runOnUiThread {
+                        binding.tvStatus.text = "AI Error"
+                    }
+                    speak(result.message)
+                }
+            }
         }
     }
 
@@ -294,33 +369,28 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
         pendingDestination = null
     }
 
+    // Position recognition via raw local coordinates is unreliable (different AR origins).
+    // Only OCR-based recognition is used.
     private fun recognizeUserPosition(currentPosition: List<Float>) {
-        if (isPositionRecognized || floorGraph == null) return
-
-        // Note: Without coordinate mapping, this only works if user started at (0,0,0) map.
-        // We favor OCR for more accurate 'entry' at any point.
-        val closestNamedWaypoint = floorGraph!!.findNearestNamedWaypoint(currentPosition)
-
-        if (closestNamedWaypoint != null) {
-            val mapPos = closestNamedWaypoint.position.map { it.toFloat() }
-            completePositionRecognition(closestNamedWaypoint.name, mapPos, currentPosition)
-        }
+        // Disabled: local coords don't match map coords without calibration
+        // Position is recognized via OCR in runAutoOcr() instead
     }
 
-    private fun completePositionRecognition(locationName: String, mapPosition: List<Float>, localPosition: List<Float>) {
-        // Calculate the translation offset between Local space and Map space
-        coordinateOffset[0] = localPosition[0] - mapPosition[0]
-        coordinateOffset[1] = localPosition[1] - mapPosition[1]
-        coordinateOffset[2] = localPosition[2] - mapPosition[2]
-        isOffsetInitialized = true
+    private fun completePositionRecognition(locationName: String, mapPosition: List<Float>, localPosition: List<Float>, nodeId: String? = null) {
+        // Store calibration reference points for rotation computation
+        calibrationLocalPos = floatArrayOf(localPosition[0], localPosition[1], localPosition[2])
+        calibrationMapPos = floatArrayOf(mapPosition[0], mapPosition[1], mapPosition[2])
+        calibrationNodeId = nodeId
+        yawOffset = 0f
+        isCalibrated = false  // Rotation calibration completes after visitor walks a bit
 
         isPositionRecognized = true
         userCurrentPosition = mapPosition
 
-        Log.d(TAG, "✅ Position recognized: $locationName")
+        Log.d(TAG, "✅ Position recognized: $locationName (node: $nodeId)")
         Log.d(TAG, "   Local Position: [${localPosition[0]}, ${localPosition[1]}, ${localPosition[2]}]")
         Log.d(TAG, "   Map Position: [${mapPosition[0]}, ${mapPosition[1]}, ${mapPosition[2]}]")
-        Log.d(TAG, "   Coordinate Offset: [${coordinateOffset[0]}, ${coordinateOffset[1]}, ${coordinateOffset[2]}]")
+        Log.d(TAG, "   ⏳ Rotation calibration pending — walk to complete")
 
         runOnUiThread {
             binding.tvStatus.text = "Position: $locationName"
@@ -332,6 +402,125 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
         if (isTtsReady && !hasAskedInitialQuestion && pendingDestination == null) {
             hasAskedInitialQuestion = true
             speak("Hello! You are near $locationName. Where would you like to go?")
+        }
+    }
+
+    /**
+     * Convert local AR position to map position using calibration data.
+     * Uses rotation + translation when calibrated, translation-only before that.
+     */
+    private fun localToMap(localPos: List<Float>): List<Float> {
+        val refLocal = calibrationLocalPos ?: return localPos
+        val refMap = calibrationMapPos ?: return localPos
+
+        val dx = localPos[0] - refLocal[0]
+        val dy = localPos[1] - refLocal[1]
+        val dz = localPos[2] - refLocal[2]
+
+        val cosY = cos(yawOffset.toDouble()).toFloat()
+        val sinY = sin(yawOffset.toDouble()).toFloat()
+
+        return listOf(
+            refMap[0] + dx * cosY + dz * sinY,
+            refMap[1] + dy,
+            refMap[2] - dx * sinY + dz * cosY
+        )
+    }
+
+    /**
+     * Convert map position to local AR position for rendering.
+     * Inverse of localToMap.
+     */
+    private fun mapToLocal(mapX: Float, mapY: Float, mapZ: Float): FloatArray {
+        val refLocal = calibrationLocalPos ?: return floatArrayOf(mapX, mapY, mapZ)
+        val refMap = calibrationMapPos ?: return floatArrayOf(mapX, mapY, mapZ)
+
+        val dx = mapX - refMap[0]
+        val dy = mapY - refMap[1]
+        val dz = mapZ - refMap[2]
+
+        val cosY = cos(yawOffset.toDouble()).toFloat()
+        val sinY = sin(yawOffset.toDouble()).toFloat()
+
+        // Inverse rotation (negate yaw)
+        return floatArrayOf(
+            refLocal[0] + dx * cosY - dz * sinY,
+            refLocal[1] + dy,
+            refLocal[2] + dx * sinY + dz * cosY
+        )
+    }
+
+    /**
+     * After OCR position lock, wait for the visitor to walk ~0.7m, then compute
+     * the yaw rotation offset by matching their movement direction against
+     * graph edge directions from the calibration node.
+     */
+    private fun tryCompleteCalibration(currentLocalPos: List<Float>) {
+        val refLocal = calibrationLocalPos ?: return
+        val refMap = calibrationMapPos ?: return
+        val nodeId = calibrationNodeId ?: return
+        val graph = floorGraph ?: return
+
+        // Compute horizontal displacement from calibration point
+        val dxLocal = currentLocalPos[0] - refLocal[0]
+        val dzLocal = currentLocalPos[2] - refLocal[2]
+        val distMoved = sqrt(dxLocal * dxLocal + dzLocal * dzLocal)
+
+        if (distMoved < CALIBRATION_MIN_DISTANCE) return // Haven't walked far enough
+
+        val localAngle = atan2(dxLocal.toDouble(), dzLocal.toDouble())
+
+        // Get all edges from the calibration node
+        val edges = graph.adjacencyList[nodeId]
+        if (edges.isNullOrEmpty()) {
+            // No edges — fallback to zero rotation
+            isCalibrated = true
+            Log.w(TAG, "⚠️ No edges from calibration node, using zero rotation")
+            return
+        }
+
+        var bestYaw = 0f
+        var bestScore = Float.MAX_VALUE
+
+        for (edge in edges) {
+            val neighbor = graph.nodes[edge.to] ?: continue
+            val dxMap = (neighbor.position[0] - refMap[0]).toFloat()
+            val dzMap = (neighbor.position[2] - refMap[2]).toFloat()
+            val edgeDist = sqrt(dxMap * dxMap + dzMap * dzMap)
+            if (edgeDist < 0.1f) continue // Skip very short edges
+
+            val mapAngle = atan2(dxMap.toDouble(), dzMap.toDouble())
+            val candidateYaw = (mapAngle - localAngle).toFloat()
+
+            // Test: apply this yaw to map current local position to map space
+            val cosA = cos(candidateYaw.toDouble()).toFloat()
+            val sinA = sin(candidateYaw.toDouble()).toFloat()
+            val mappedX = refMap[0] + dxLocal * cosA + dzLocal * sinA
+            val mappedZ = refMap[2] - dxLocal * sinA + dzLocal * cosA
+            val mappedPos = listOf(mappedX, currentLocalPos[1], mappedZ)
+
+            // Check how close this mapped position is to any graph node
+            val nearestNode = graph.findNearestNode(mappedPos)
+            val distToGraph = if (nearestNode != null) {
+                graph.calculateDistanceFromFloat(mappedPos, nearestNode.position)
+            } else Float.MAX_VALUE
+
+            if (distToGraph < bestScore) {
+                bestScore = distToGraph
+                bestYaw = candidateYaw
+            }
+        }
+
+        yawOffset = bestYaw
+        isCalibrated = true
+
+        Log.d(TAG, "✅ Rotation calibrated! Yaw offset: ${Math.toDegrees(yawOffset.toDouble())}°")
+        Log.d(TAG, "   Local movement: (${String.format("%.2f", dxLocal)}, ${String.format("%.2f", dzLocal)})")
+        Log.d(TAG, "   Distance moved: ${String.format("%.2f", distMoved)}m")
+        Log.d(TAG, "   Best match score: ${String.format("%.3f", bestScore)}m from graph")
+
+        runOnUiThread {
+            binding.tvOcrStatus.text = "Calibrated ✓ (${String.format("%.0f", Math.toDegrees(yawOffset.toDouble()))}°)"
         }
     }
 
@@ -393,7 +582,7 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
                 }
                 val localPos = listOf(cameraPose.tx(), cameraPose.ty(), cameraPose.tz())
                 val mapPos = match.position.map { it.toFloat() }
-                completePositionRecognition(match.name, mapPos, localPos)
+                completePositionRecognition(match.name, mapPos, localPos, match.id)
                 break
             }
         }
@@ -467,10 +656,10 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
                 val arrowY = startY + dy * t + ARROW_HEIGHT_OFFSET
                 val arrowZ = startZ + dz * t
 
-                // Calculate distance from user to this arrow (in map coordinates)
+                // Calculate horizontal distance from user to this arrow (XZ only)
+                // Avoids Y-axis drift filtering out valid nearby arrows
                 val distToUser = sqrt(
                     (arrowX - userPosition[0]) * (arrowX - userPosition[0]) +
-                            (arrowY - userPosition[1]) * (arrowY - userPosition[1]) +
                             (arrowZ - userPosition[2]) * (arrowZ - userPosition[2])
                 )
 
@@ -493,6 +682,101 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
         }
 
         return arrows
+    }
+
+    /**
+     * Check if visitor is approaching a restricted area.
+     * Alerts the visitor via TTS and notifies the host via Firebase.
+     */
+    private fun checkRestrictedAreaProximity(mappedPosition: List<Float>) {
+        val graph = floorGraph ?: return
+        val restrictedAreas = graph.getRestrictedAreas()
+        if (restrictedAreas.isEmpty()) return
+
+        val currentTime = System.currentTimeMillis()
+
+        for (area in restrictedAreas) {
+            val distance = graph.calculateDistanceFromFloat(mappedPosition, area.position)
+
+            if (distance < RESTRICTED_AREA_ALERT_DISTANCE) {
+                // Check cooldown to avoid spamming
+                val isSameArea = lastAlertedRestrictedNodeId == area.id
+                val cooldownPassed = currentTime - lastRestrictedAlertTime > RESTRICTED_ALERT_COOLDOWN_MS
+
+                if (!isSameArea || cooldownPassed) {
+                    lastRestrictedAlertTime = currentTime
+                    lastAlertedRestrictedNodeId = area.id
+
+                    Log.w(TAG, "⛔ RESTRICTED AREA ALERT: Visitor near '${area.name}' (${String.format("%.1f", distance)}m)")
+
+                    // Alert the visitor
+                    speak("Warning! You are entering a restricted area near ${area.name}. This area is restricted. Please turn back.")
+
+                    runOnUiThread {
+                        binding.tvStatus.text = "⛔ RESTRICTED: ${area.name}"
+                        Toast.makeText(this, "⛔ Restricted Area: ${area.name}", Toast.LENGTH_LONG).show()
+                    }
+
+                    // Stop navigation if currently navigating towards restricted area
+                    if (isNavigating) {
+                        isNavigating = false
+                        currentPath = null
+                        currentWaypointIndex = 0
+                        runOnUiThread {
+                            binding.tvDirection.text = "⛔ Navigation stopped - Restricted area"
+                        }
+                    }
+
+                    // Send alert to host via Firebase
+                    sendRestrictedAreaAlert(area.name, distance)
+                }
+                return // Only alert for the closest restricted area
+            }
+        }
+
+        // Clear the alert state if we moved away from all restricted areas
+        if (lastAlertedRestrictedNodeId != null) {
+            val lastArea = restrictedAreas.find { it.id == lastAlertedRestrictedNodeId }
+            if (lastArea != null) {
+                val distToLast = graph.calculateDistanceFromFloat(mappedPosition, lastArea.position)
+                if (distToLast > RESTRICTED_AREA_ALERT_DISTANCE * 1.5f) {
+                    lastAlertedRestrictedNodeId = null
+                    Log.d(TAG, "✅ Visitor moved away from restricted area")
+                }
+            }
+        }
+    }
+
+    /**
+     * Send a Firebase alert when a visitor enters a restricted area.
+     * The host can listen to this in ARActivity or a monitoring dashboard.
+     */
+    private fun sendRestrictedAreaAlert(areaName: String, distance: Float) {
+        val alertData = hashMapOf(
+            "areaName" to areaName,
+            "distance" to distance.toDouble(),
+            "timestamp" to System.currentTimeMillis(),
+            "message" to "Visitor detected near restricted area: $areaName"
+        )
+
+        database.getReference("restrictedAreaAlerts")
+            .push()
+            .setValue(alertData)
+            .addOnSuccessListener {
+                Log.d(TAG, "📤 Restricted area alert sent to host for: $areaName")
+            }
+            .addOnFailureListener { e ->
+                Log.e(TAG, "Failed to send restricted area alert", e)
+            }
+
+        // Also set a live flag so host gets instant notification
+        database.getReference("restrictedAreaBreach").setValue(
+            hashMapOf(
+                "active" to true,
+                "areaName" to areaName,
+                "timestamp" to System.currentTimeMillis()
+            )
+        )
     }
 
     private fun listenForEmergency() {
@@ -632,18 +916,19 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
 
             val cameraPosLocal = listOf(camera.pose.tx(), camera.pose.ty(), camera.pose.tz())
 
-            // Map local AR coordinates to stored Map coordinates
-            val mappedUserPos = if (isOffsetInitialized) {
-                listOf(
-                    cameraPosLocal[0] - coordinateOffset[0],
-                    cameraPosLocal[1] - coordinateOffset[1],
-                    cameraPosLocal[2] - coordinateOffset[2]
-                )
-            } else {
-                cameraPosLocal
+            // Try rotation calibration if position recognized but rotation not yet calibrated
+            if (isPositionRecognized && !isCalibrated) {
+                tryCompleteCalibration(cameraPosLocal)
             }
 
+            // Map local AR coordinates to stored Map coordinates (with rotation)
+            val mappedUserPos = localToMap(cameraPosLocal)
             userCurrentPosition = mappedUserPos
+
+            // Check restricted area proximity
+            if (isPositionRecognized) {
+                checkRestrictedAreaProximity(mappedUserPos)
+            }
 
             if (!isPositionRecognized) {
                 recognizeUserPosition(cameraPosLocal)
@@ -660,17 +945,20 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
                 val remainingPath = path.nodes.drop(currentWaypointIndex)
                 val arrows = generateContinuousArrows(remainingPath, mappedUserPos)
 
+                // Use camera Y for consistent arrow height (avoids floating/sunken arrows)
+                val arrowLocalY = cameraPosLocal[1] - 0.5f
+
                 arrowModel?.let { arrow ->
                     for (arrowPos in arrows) {
-                        // Translate map-coordinate arrows to local-coordinate space for rendering
-                        val lx = arrowPos.x + coordinateOffset[0]
-                        val ly = arrowPos.y + coordinateOffset[1]
-                        val lz = arrowPos.z + coordinateOffset[2]
+                        // Convert map-coordinate arrow to local-coordinate space (with rotation)
+                        val localPos = mapToLocal(arrowPos.x, arrowPos.y, arrowPos.z)
 
                         val modelMatrix = FloatArray(16)
                         Matrix.setIdentityM(modelMatrix, 0)
-                        Matrix.translateM(modelMatrix, 0, lx, ly, lz)
-                        Matrix.rotateM(modelMatrix, 0, arrowPos.rotation, 0f, 1f, 0f)
+                        Matrix.translateM(modelMatrix, 0, localPos[0], arrowLocalY, localPos[2])
+                        // Adjust arrow rotation from map space to local space
+                        val localRotation = arrowPos.rotation - Math.toDegrees(yawOffset.toDouble()).toFloat()
+                        Matrix.rotateM(modelMatrix, 0, localRotation, 0f, 1f, 0f)
                         Matrix.scaleM(modelMatrix, 0, 0.35f, 0.35f, 0.35f)
 
                         val mvpMatrix = FloatArray(16)
@@ -682,18 +970,28 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
                     }
                 }
 
-                // Draw destination marker (Translated to Local)
+                // Draw destination marker (converted to local space with rotation)
                 renderer?.let { r ->
                     val destNode = path.nodes.last()
                     val pos = destNode.toFloatArray()
-                    val lx = pos[0] + coordinateOffset[0]
-                    val ly = pos[1] + coordinateOffset[1]
-                    val lz = pos[2] + coordinateOffset[2]
-                    r.draw(viewMatrix, projectionMatrix, lx, ly, lz, destinationColor)
+                    val localDest = mapToLocal(pos[0], pos[1], pos[2])
+                    r.draw(viewMatrix, projectionMatrix, localDest[0], arrowLocalY, localDest[2], destinationColor)
                 }
             } else {
                 // Show avatar when not navigating
                 avatarRenderer?.draw(viewMatrix, projectionMatrix, cameraPosLocal[0] - (camera.pose.zAxis[0] * 2.0f), cameraPosLocal[1] - 1.5f, cameraPosLocal[2] - (camera.pose.zAxis[2] * 2.0f))
+            }
+
+            // Always render restricted area markers (visible purple circles)
+            if (isPositionRecognized) {
+                val arrowLocalY = cameraPosLocal[1] - 0.5f
+                renderer?.let { r ->
+                    floorGraph?.getRestrictedAreas()?.forEach { restricted ->
+                        val pos = restricted.toFloatArray()
+                        val localPos = mapToLocal(pos[0], pos[1], pos[2])
+                        r.draw(viewMatrix, projectionMatrix, localPos[0], arrowLocalY, localPos[2], restrictedColor)
+                    }
+                }
             }
         } catch (e: Exception) {
             Log.e(TAG, "Error in onDrawFrame", e)

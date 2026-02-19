@@ -4,27 +4,57 @@
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:orientation="vertical"
+    android:background="@drawable/bg_gradient_dark"
     android:gravity="center_horizontal"
+    android:paddingHorizontal="32dp"
     tools:context=".BuildingActivity">
+
+    <!-- Header -->
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="🏢"
+        android:textSize="48sp"
+        android:layout_marginTop="60dp" />
 
     <TextView
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:text="Building!"
-        android:textSize="24sp"
-        android:layout_marginTop="16dp" />
+        android:text="Select Building"
+        android:textSize="26sp"
+        android:textStyle="bold"
+        android:textColor="@color/text_primary"
+        android:layout_marginTop="12dp" />
 
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="Choose a building to explore"
+        android:textSize="14sp"
+        android:textColor="@color/text_secondary"
+        android:layout_marginTop="6dp"
+        android:layout_marginBottom="48dp" />
+
+    <!-- Building Cards -->
     <Button
         android:id="@+id/btnMGeorge"
-        android:layout_width="200dp"
-        android:layout_height="wrap_content"
-        android:text="M George"
-        android:layout_marginTop="16dp" />
+        android:layout_width="match_parent"
+        android:layout_height="60dp"
+        android:text="🏛️  M George Block"
+        android:textSize="16sp"
+        android:textColor="@color/white"
+        android:textAllCaps="false"
+        android:background="@drawable/bg_btn_primary" />
 
     <Button
         android:id="@+id/btnRamanujan"
-        android:layout_width="200dp"
-        android:layout_height="wrap_content"
-        android:text="Ramanujan" />
+        android:layout_width="match_parent"
+        android:layout_height="60dp"
+        android:text="🏛️  Ramanujan Block"
+        android:textSize="16sp"
+        android:textColor="@color/text_primary"
+        android:textAllCaps="false"
+        android:background="@drawable/bg_btn_outline"
+        android:layout_marginTop="16dp" />
 
 </LinearLayout>

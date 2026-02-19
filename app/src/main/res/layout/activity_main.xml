@@ -4,40 +4,94 @@
     xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:padding="16dp">
+    android:background="@drawable/bg_gradient_dark">
+
+    <!-- Branding area -->
+    <TextView
+        android:id="@+id/tvSubtitle"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="🏛️"
+        android:textSize="64sp"
+        app:layout_constraintTop_toTopOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toEndOf="parent"
+        android:layout_marginTop="120dp" />
 
     <TextView
         android:id="@+id/tvTitle"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:text="AR Avatar Guide"
-        android:textSize="24sp"
+        android:text="MITSWAY AR"
+        android:textSize="32sp"
         android:textStyle="bold"
-        app:layout_constraintTop_toTopOf="parent"
+        android:textColor="@color/primary"
+        android:letterSpacing="0.15"
+        app:layout_constraintTop_toBottomOf="@id/tvSubtitle"
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintEnd_toEndOf="parent"
-        android:layout_marginTop="100dp" />
+        android:layout_marginTop="16dp" />
 
-    <Button
-        android:id="@+id/btnHost"
-        android:layout_width="200dp"
-        android:layout_height="60dp"
-        android:text="Host Mode"
-        android:textSize="18sp"
+    <TextView
+        android:id="@+id/tvTagline"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="AI-Powered Campus Navigation"
+        android:textSize="14sp"
+        android:textColor="@color/text_secondary"
+        android:letterSpacing="0.05"
         app:layout_constraintTop_toBottomOf="@id/tvTitle"
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintEnd_toEndOf="parent"
-        android:layout_marginTop="80dp" />
+        android:layout_marginTop="8dp" />
 
-    <Button
-        android:id="@+id/btnVisitor"
-        android:layout_width="200dp"
-        android:layout_height="60dp"
-        android:text="Visitor Mode"
-        android:textSize="18sp"
-        app:layout_constraintTop_toBottomOf="@id/btnHost"
+    <!-- Buttons Card -->
+    <LinearLayout
+        android:id="@+id/cardButtons"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:background="@drawable/bg_card"
+        android:padding="28dp"
+        android:layout_marginHorizontal="32dp"
+        app:layout_constraintTop_toBottomOf="@id/tvTagline"
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintEnd_toEndOf="parent"
-        android:layout_marginTop="24dp" />
+        android:layout_marginTop="60dp">
+
+        <Button
+            android:id="@+id/btnHost"
+            android:layout_width="match_parent"
+            android:layout_height="56dp"
+            android:text="🗺️  Host Mode"
+            android:textSize="16sp"
+            android:textColor="@color/white"
+            android:textAllCaps="false"
+            android:background="@drawable/bg_btn_primary" />
+
+        <Button
+            android:id="@+id/btnVisitor"
+            android:layout_width="match_parent"
+            android:layout_height="56dp"
+            android:text="🧭  Visitor Mode"
+            android:textSize="16sp"
+            android:textColor="@color/text_primary"
+            android:textAllCaps="false"
+            android:background="@drawable/bg_btn_outline"
+            android:layout_marginTop="16dp" />
+
+    </LinearLayout>
+
+    <!-- Footer -->
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="Powered by ARCore + Groq AI"
+        android:textSize="12sp"
+        android:textColor="@color/text_hint"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toEndOf="parent"
+        android:layout_marginBottom="24dp" />
 
 </androidx.constraintlayout.widget.ConstraintLayout>

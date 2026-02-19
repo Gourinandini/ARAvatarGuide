@@ -4,13 +4,43 @@
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:orientation="vertical"
+    android:background="@drawable/bg_gradient_dark"
     android:gravity="center_horizontal"
+    android:paddingHorizontal="32dp"
     tools:context=".FloorNavigationActivity">
+
+    <!-- Header -->
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="🧭"
+        android:textSize="48sp"
+        android:layout_marginTop="60dp" />
+
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="Select Floor"
+        android:textSize="26sp"
+        android:textStyle="bold"
+        android:textColor="@color/text_primary"
+        android:layout_marginTop="12dp" />
+
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="Choose a floor to begin navigation"
+        android:textSize="14sp"
+        android:textColor="@color/text_secondary"
+        android:layout_marginTop="6dp"
+        android:layout_marginBottom="40dp" />
 
     <Spinner
         android:id="@+id/spinnerFloors"
         android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_margin="16dp" />
+        android:layout_height="52dp"
+        android:background="@drawable/bg_input"
+        android:paddingHorizontal="16dp"
+        android:popupBackground="@color/bg_elevated" />
 
 </LinearLayout>
