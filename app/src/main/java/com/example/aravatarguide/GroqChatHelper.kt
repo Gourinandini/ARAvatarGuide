@@ -45,9 +45,9 @@ class GroqChatHelper(private val apiKey: String) {
             Available locations in this building: ${availableLocations.joinToString(", ")}.
             
             RULES:
-            1. If the user wants to go to a specific location, reply with EXACTLY this format on a new line: NAVIGATE_TO: [Location Name]
-               Use the exact location name from the available locations list.
-            2. If the user asks about what places are available, list them in a friendly way.
+            1. If the user wants to go to a specific location, reply with EXACTLY this format on a new line: NAVIGATE_TO: Location Name
+               Use the exact location name from the available locations list. Do NOT wrap it in brackets or quotes.
+            2. If the user just says a location name (like "library" or "room 101"), treat it as a navigation request and respond with NAVIGATE_TO: Location Name
             3. For general conversation, be friendly, warm, and talk like a good friend.
             4. Keep responses SHORT (1-2 sentences max) since they will be spoken aloud via text-to-speech.
             5. Don't use emojis or special characters since the response is spoken.
@@ -133,6 +133,10 @@ class GroqChatHelper(private val apiKey: String) {
                         .trim()
                         .lines()
                         .first()
+                        .trim()
+                        .removeSurrounding("[", "]")
+                        .removeSurrounding("\"", "\"")
+                        .removeSurrounding("'", "'")
                         .trim()
                     // Extract any conversational text before the command
                     val conversationalPart = assistantMessage

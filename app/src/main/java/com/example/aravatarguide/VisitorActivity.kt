@@ -100,10 +100,10 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
         private const val PERMISSION_CODE = 100
         private const val WAYPOINT_REACHED_DISTANCE = 0.8f
         private const val CALIBRATION_MIN_DISTANCE = 0.7f // Min walk distance for rotation calibration
-        private const val ARROW_SPACING = 0.8f // Distance between arrows (meters)
+        private const val ARROW_SPACING = 0.6f // Distance between arrows (meters)
         private const val ARROW_HEIGHT_OFFSET = 0.1f // Height above ground
-        private const val MAX_VISIBLE_ARROWS = 7 // Only show 7 arrows ahead
-        private const val MAX_ARROW_DISTANCE = 6.0f // Maximum distance to show arrows (meters)
+        private const val MAX_VISIBLE_ARROWS = 50 // Show enough arrows for continuous path
+        private const val MAX_ARROW_DISTANCE = 50.0f // Show arrows along the full path
         private const val RESTRICTED_AREA_ALERT_DISTANCE = 2.0f // Alert when within 2m of restricted area
         private const val TAG = "VisitorActivity"
     }
@@ -249,23 +249,65 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
         runOnUiThread { binding.tvSpeechInput.text = "You said: \"$command\"" }
         Log.d(TAG, "Processing voice command: $command")
 
-        // 1. Check for direct navigation commands first (simple keyword matching)
-        val matchedWaypoint = floorGraph?.getNamedWaypoints()?.find {
-            command.contains(it.name, ignoreCase = true) && 
-            (command.contains("go to", ignoreCase = true) || 
+        // 1. Try exact name match with navigation keywords
+        val namedWaypoints = floorGraph?.getNamedWaypoints() ?: emptyList()
+        val matchedWaypoint = namedWaypoints.find {
+            command.contains(it.name, ignoreCase = true) &&
+            (command.contains("go to", ignoreCase = true) ||
              command.contains("navigate to", ignoreCase = true) ||
              command.contains("take me to", ignoreCase = true) ||
-             command.contains("where is", ignoreCase = true))
+             command.contains("where is", ignoreCase = true) ||
+             command.contains("find", ignoreCase = true) ||
+             command.contains("show me", ignoreCase = true) ||
+             command.contains("direction", ignoreCase = true) ||
+             command.contains("want to go", ignoreCase = true) ||
+             command.contains("want to visit", ignoreCase = true))
         }
 
         if (matchedWaypoint != null) {
-            Log.d(TAG, "Matched waypoint: ${matchedWaypoint.name}")
+            Log.d(TAG, "Matched waypoint (keyword + name): ${matchedWaypoint.name}")
             startNavigation(matchedWaypoint.name)
             return
         }
 
-        // 2. If not a direct navigation command, use Gemini for conversational AI
+        // 2. Try matching just the location name (user might just say the name)
+        val directMatch = findBestMatchingWaypoint(command, namedWaypoints)
+        if (directMatch != null) {
+            Log.d(TAG, "Matched waypoint (direct name match): ${directMatch.name}")
+            startNavigation(directMatch.name)
+            return
+        }
+
+        // 3. If not a direct navigation command, use AI for conversational processing
         processConversationalCommand(command)
+    }
+
+    /**
+     * Flexible waypoint matching: tries exact, contains, and partial matching.
+     */
+    private fun findBestMatchingWaypoint(input: String, waypoints: List<GraphNode>): GraphNode? {
+        val cleanInput = input.trim().lowercase()
+        if (cleanInput.length < 2) return null
+
+        // Exact match (case-insensitive)
+        waypoints.find { it.name.trim().lowercase() == cleanInput }?.let { return it }
+
+        // Input contains a waypoint name
+        waypoints.find { cleanInput.contains(it.name.trim().lowercase()) }?.let { return it }
+
+        // Waypoint name contains input (e.g., user says "library", waypoint is "Main Library")
+        waypoints.find { it.name.trim().lowercase().contains(cleanInput) }?.let { return it }
+
+        // Word-level match: any word in input matches a waypoint name word
+        val inputWords = cleanInput.split("\\s+".toRegex()).filter { it.length >= 3 }
+        for (wp in waypoints) {
+            val wpWords = wp.name.trim().lowercase().split("\\s+".toRegex())
+            if (inputWords.any { word -> wpWords.any { it == word } }) {
+                return wp
+            }
+        }
+
+        return null
     }
 
     private fun processConversationalCommand(command: String) {
@@ -278,10 +320,9 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
                 }
                 is GroqChatHelper.ChatResult.Navigation -> {
                     val destination = result.destination
-                    // Verify destination exists
-                    val validDest = floorGraph?.getNamedWaypoints()?.find {
-                        it.name.equals(destination, ignoreCase = true)
-                    }
+                    // Verify destination exists (flexible matching)
+                    val namedWaypoints = floorGraph?.getNamedWaypoints() ?: emptyList()
+                    val validDest = findBestMatchingWaypoint(destination, namedWaypoints)
 
                     if (validDest != null) {
                         if (result.preText.isNotBlank()) {
@@ -291,7 +332,21 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
                             startNavigation(validDest.name)
                         }
                     } else {
-                        speak("I understood you want to go to $destination, but I can't find it on the map.")
+                        // Last resort: try the original destination name directly
+                        val exactDest = namedWaypoints.find {
+                            it.name.equals(destination, ignoreCase = true)
+                        }
+                        if (exactDest != null) {
+                            if (result.preText.isNotBlank()) {
+                                speak(result.preText)
+                            }
+                            runOnUiThread {
+                                startNavigation(exactDest.name)
+                            }
+                        } else {
+                            val availableNames = namedWaypoints.joinToString(", ") { it.name }
+                            speak("I couldn't find $destination on the map. Available locations are: $availableNames")
+                        }
                     }
                 }
                 is GroqChatHelper.ChatResult.Error -> {
@@ -618,67 +673,67 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
         }
     }
 
-    // Generate continuous arrow positions along the path (Map Coordinates)
-    // Only shows arrows within MAX_ARROW_DISTANCE from user and up to MAX_VISIBLE_ARROWS
+    // Generate continuous arrow positions along the full path from user to destination (Map Coordinates)
     private fun generateContinuousArrows(path: List<GraphNode>, userPosition: List<Float>): List<ArrowPosition> {
+        if (path.isEmpty()) return emptyList()
+
         val arrows = mutableListOf<ArrowPosition>()
         var arrowCount = 0
 
-        for (i in 0 until path.size - 1) {
-            if (arrowCount >= MAX_VISIBLE_ARROWS) break // Stop after showing enough arrows
+        // Build the complete polyline: user position -> first waypoint -> ... -> destination
+        data class PathPoint(val x: Float, val y: Float, val z: Float)
 
-            val start = path[i]
-            val end = path[i + 1]
+        val polyline = mutableListOf<PathPoint>()
+        // Start from user's current position for a truly continuous trail
+        polyline.add(PathPoint(userPosition[0], userPosition[1], userPosition[2]))
+        for (node in path) {
+            polyline.add(PathPoint(
+                node.position[0].toFloat(),
+                node.position[1].toFloat(),
+                node.position[2].toFloat()
+            ))
+        }
 
-            val startX = start.position[0].toFloat()
-            val startY = start.position[1].toFloat()
-            val startZ = start.position[2].toFloat()
+        // Generate arrows along each segment of the polyline
+        // Start a small offset from user so the first arrow isn't right under their feet
+        var isFirstSegment = true
 
-            val endX = end.position[0].toFloat()
-            val endY = end.position[1].toFloat()
-            val endZ = end.position[2].toFloat()
+        for (i in 0 until polyline.size - 1) {
+            if (arrowCount >= MAX_VISIBLE_ARROWS) break
 
-            val dx = endX - startX
-            val dy = endY - startY
-            val dz = endZ - startZ
+            val start = polyline[i]
+            val end = polyline[i + 1]
+
+            val dx = end.x - start.x
+            val dy = end.y - start.y
+            val dz = end.z - start.z
 
             val segmentLength = sqrt(dx * dx + dy * dy + dz * dz)
-
             if (segmentLength < 0.1f) continue
 
             val angleY = Math.toDegrees(atan2(dx.toDouble(), dz.toDouble())).toFloat()
 
-            var distance = 0f
+            // For first segment (user -> first waypoint), skip the first 0.5m so arrows
+            // don't appear directly under the user's feet
+            var distance = if (isFirstSegment) 0.5f else 0f
+            isFirstSegment = false
+
             while (distance < segmentLength && arrowCount < MAX_VISIBLE_ARROWS) {
                 val t = distance / segmentLength
 
-                val arrowX = startX + dx * t
-                val arrowY = startY + dy * t + ARROW_HEIGHT_OFFSET
-                val arrowZ = startZ + dz * t
+                val arrowX = start.x + dx * t
+                val arrowY = start.y + dy * t + ARROW_HEIGHT_OFFSET
+                val arrowZ = start.z + dz * t
 
-                // Calculate horizontal distance from user to this arrow (XZ only)
-                // Avoids Y-axis drift filtering out valid nearby arrows
-                val distToUser = sqrt(
-                    (arrowX - userPosition[0]) * (arrowX - userPosition[0]) +
-                            (arrowZ - userPosition[2]) * (arrowZ - userPosition[2])
-                )
-
-                // Only add arrow if it's within visible distance
-                if (distToUser <= MAX_ARROW_DISTANCE) {
-                    arrows.add(ArrowPosition(arrowX, arrowY, arrowZ, angleY))
-                    arrowCount++
-
-                    if (arrowCount == 1) {
-                        Log.v(TAG, "🎯 First arrow at distance ${String.format("%.2f", distToUser)}m from user")
-                    }
-                }
+                arrows.add(ArrowPosition(arrowX, arrowY, arrowZ, angleY))
+                arrowCount++
 
                 distance += ARROW_SPACING
             }
         }
 
-        if (arrows.size > 0) {
-            Log.v(TAG, "📍 Showing ${arrows.size} arrows (max: $MAX_VISIBLE_ARROWS, max distance: ${MAX_ARROW_DISTANCE}m)")
+        if (arrows.isNotEmpty()) {
+            Log.v(TAG, "📍 Showing ${arrows.size} continuous arrows to destination")
         }
 
         return arrows

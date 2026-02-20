@@ -11,9 +11,7 @@ class ShortestPathFinder(private val graph: FloorGraph) {
 
     fun findPathToDestination(startPos: List<Float>, destinationName: String): PathResult? {
         val startNode = graph.findNearestNode(startPos) ?: return null
-        val destinationNode = graph.getNamedWaypoints().find {
-            it.name.equals(destinationName, ignoreCase = true)
-        } ?: return null
+        val destinationNode = findDestinationNode(destinationName) ?: return null
 
         val distances = mutableMapOf<String, Float>()
         val previousNodes = mutableMapOf<String, GraphNode?>()
@@ -65,6 +63,34 @@ class ShortestPathFinder(private val graph: FloorGraph) {
         if (path.firstOrNull()?.id == startNode.id) {
             val totalDistance = distances[destinationNode.id] ?: Float.MAX_VALUE
             return PathResult(path, totalDistance)
+        }
+
+        return null
+    }
+
+    /**
+     * Flexible destination matching: exact -> contains -> partial word match
+     */
+    private fun findDestinationNode(name: String): GraphNode? {
+        val namedWaypoints = graph.getNamedWaypoints()
+        val cleanName = name.trim().lowercase()
+
+        // 1. Exact match (case-insensitive)
+        namedWaypoints.find { it.name.trim().equals(cleanName, ignoreCase = true) }?.let { return it }
+
+        // 2. Input contains waypoint name
+        namedWaypoints.find { cleanName.contains(it.name.trim().lowercase()) }?.let { return it }
+
+        // 3. Waypoint name contains input
+        namedWaypoints.find { it.name.trim().lowercase().contains(cleanName) }?.let { return it }
+
+        // 4. Word-level match
+        val inputWords = cleanName.split("\\s+".toRegex()).filter { it.length >= 3 }
+        for (wp in namedWaypoints) {
+            val wpWords = wp.name.trim().lowercase().split("\\s+".toRegex())
+            if (inputWords.any { word -> wpWords.any { it == word } }) {
+                return wp
+            }
         }
 
         return null
