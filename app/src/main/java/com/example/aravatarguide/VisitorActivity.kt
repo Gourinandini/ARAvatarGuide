@@ -92,20 +92,45 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
     private var calibrationNodeId: String? = null          // Graph node matched at calibration point
     private var yawOffset: Float = 0f                      // Rotation offset (radians): local to map
     private var isCalibrated = false                       // Full calibration with rotation complete
+    private var lastCalibrationAttemptTime = 0L             // Throttle calibration to avoid frame drops
 
     // Groq AI (Free Llama 3.3 70B)
     private lateinit var chatHelper: GroqChatHelper
 
+    // Multi-point trajectory calibration state
+    private data class WalkedPoint(val dxLocal: Float, val dzLocal: Float)
+    private val walkedPoints = mutableListOf<WalkedPoint>()
+    private var lastWalkedPointDist = 0f
+    private var lastCalibratedDistance = 0f
+
+    // Pre-computed graph edge segments for calibration scoring
+    private data class EdgeSegment(val ax: Float, val az: Float, val bx: Float, val bz: Float)
+    private var cachedEdgeSegments: List<EdgeSegment>? = null
+
+    // Destination arrival: avatar faces user
+    private var hasReachedDestination = false
+    private var destinationReachedMapPos: FloatArray? = null
+
+    // Camera forward direction (updated each frame for directional guidance)
+    private var lastCameraForwardX = 0f
+    private var lastCameraForwardZ = 0f
+    private var initialGuidanceGiven = false
+
     companion object {
         private const val PERMISSION_CODE = 100
         private const val WAYPOINT_REACHED_DISTANCE = 0.8f
-        private const val CALIBRATION_MIN_DISTANCE = 0.7f // Min walk distance for rotation calibration
+        private const val CALIBRATION_MIN_DISTANCE = 0.3f // Start collecting trajectory points after 0.3m
         private const val ARROW_SPACING = 0.6f // Distance between arrows (meters)
         private const val ARROW_HEIGHT_OFFSET = 0.1f // Height above ground
-        private const val MAX_VISIBLE_ARROWS = 50 // Show enough arrows for continuous path
-        private const val MAX_ARROW_DISTANCE = 50.0f // Show arrows along the full path
+        private const val MAX_VISIBLE_ARROWS = 4 // Rolling window: only 3-4 arrows ahead of user
+        private const val MAX_ARROW_DISTANCE = 3.0f // Only show arrows within 3m of user
         private const val RESTRICTED_AREA_ALERT_DISTANCE = 2.0f // Alert when within 2m of restricted area
         private const val TAG = "VisitorActivity"
+        private const val WALK_POINT_SPACING = 0.2f // Collect a trajectory point every 0.2m
+        private const val MIN_CALIBRATION_POINTS = 3 // Need 3 trajectory points for reliable yaw
+        private const val MAX_CALIBRATION_POINTS = 12 // Keep last 12 trajectory points
+        private const val CALIBRATION_REFINE_DISTANCE = 0.8f // Re-refine after walking further
+        private const val AVATAR_DISPLAY_DISTANCE = 2.0f // Fixed distance to render avatar from user
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -364,6 +389,9 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
         Log.d(TAG, "Starting navigation to: $destinationName")
         pendingDestination = destinationName
         isNavigating = true
+        hasReachedDestination = false
+        destinationReachedMapPos = null
+        initialGuidanceGiven = false
         runOnUiThread {
             binding.initialStateContainer.visibility = View.GONE
             binding.tvStatus.text = "Finding path to $destinationName..."
@@ -379,8 +407,28 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
         try {
             Log.d(TAG, "🗺️ Finding path to $destName")
             Log.d(TAG, "   User Position (Map Coords): [${currentPos[0]}, ${currentPos[1]}, ${currentPos[2]}]")
+            Log.d(TAG, "   Calibration Node ID: $calibrationNodeId")
+            Log.d(TAG, "   Graph: ${graph.getNodeCount()} nodes, ${graph.getNamedWaypointCount()} named")
+            Log.d(TAG, "   Named waypoints: ${graph.getNamedWaypoints().joinToString { "'${it.name}'(${it.id.take(8)})" }}")
 
-            val pathResult = finder.findPathToDestination(currentPos, destName)
+            // Use the exact OCR-matched node as start if available, otherwise fall back to nearest node
+            var pathResult: PathResult? = null
+
+            if (calibrationNodeId != null) {
+                val startExists = graph.nodes.containsKey(calibrationNodeId)
+                Log.d(TAG, "   Start node exists in graph: $startExists")
+                if (startExists) {
+                    pathResult = finder.findPathFromNode(calibrationNodeId!!, destName)
+                    Log.d(TAG, "   findPathFromNode result: ${if (pathResult != null) "${pathResult.nodes.size} nodes" else "null"}")
+                }
+            }
+
+            // Fallback: try position-based pathfinding if node-based failed
+            if (pathResult == null) {
+                Log.d(TAG, "   Trying position-based fallback...")
+                pathResult = finder.findPathToDestination(currentPos, destName)
+                Log.d(TAG, "   findPathToDestination result: ${if (pathResult != null) "${pathResult.nodes.size} nodes" else "null"}")
+            }
 
             if (pathResult != null) {
                 currentPath = pathResult
@@ -404,7 +452,10 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
                     binding.tvDirection.visibility = View.VISIBLE
                     binding.tvStatus.text = "Navigate to $destName"
                 }
-                speak("Starting navigation to $destName. Follow the arrows.")
+                // Compute direction from the first path segment (aligned with arrows)
+                val initialDirection = computeInitialDirection(pathResult, currentPos)
+                speak("Starting navigation to $destName. $initialDirection and follow the arrows.")
+                initialGuidanceGiven = true
             } else {
                 Log.w(TAG, "❌ No path found to $destName")
                 Log.w(TAG, "   Check if destination exists and is connected to other waypoints")
@@ -424,6 +475,57 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
         pendingDestination = null
     }
 
+    /**
+     * Compute initial turn direction by comparing the user's camera facing direction
+     * against the first path segment direction (same direction as the rendered arrows).
+     * Only called AFTER calibration is complete, so yawOffset is accurate.
+     */
+    private fun computeInitialDirection(pathResult: PathResult, userMapPos: List<Float>): String {
+        if (pathResult.nodes.isEmpty()) return "Go straight ahead"
+
+        // Use the first path segment direction — this is exactly where arrows point
+        val targetNode = pathResult.nodes.first()
+        val pathDx = targetNode.position[0].toFloat() - userMapPos[0]
+        val pathDz = targetNode.position[2].toFloat() - userMapPos[2]
+
+        // If the first node is very close, look at the second node for better direction
+        val dx: Float
+        val dz: Float
+        val distToFirst = sqrt(pathDx * pathDx + pathDz * pathDz)
+        if (distToFirst < 0.5f && pathResult.nodes.size > 1) {
+            val secondNode = pathResult.nodes[1]
+            dx = secondNode.position[0].toFloat() - userMapPos[0]
+            dz = secondNode.position[2].toFloat() - userMapPos[2]
+        } else {
+            dx = pathDx
+            dz = pathDz
+        }
+
+        // Path direction angle in map space (this matches arrow rendering direction)
+        val pathAngle = Math.toDegrees(atan2(dx.toDouble(), dz.toDouble()))
+
+        // Convert camera forward from local space to map space using calibrated yawOffset
+        val cosY = cos(yawOffset.toDouble()).toFloat()
+        val sinY = sin(yawOffset.toDouble()).toFloat()
+        val mapFwdX = lastCameraForwardX * cosY + lastCameraForwardZ * sinY
+        val mapFwdZ = -lastCameraForwardX * sinY + lastCameraForwardZ * cosY
+        val cameraAngle = Math.toDegrees(atan2(mapFwdX.toDouble(), mapFwdZ.toDouble()))
+
+        // Relative angle: positive = path is to the right of camera
+        var relativeAngle = pathAngle - cameraAngle
+        while (relativeAngle > 180) relativeAngle -= 360
+        while (relativeAngle < -180) relativeAngle += 360
+
+        Log.d(TAG, "\uD83E\uDDED Direction guidance: pathAngle=${String.format("%.0f", pathAngle)}° cameraAngle=${String.format("%.0f", cameraAngle)}° relative=${String.format("%.0f", relativeAngle)}°")
+
+        return when {
+            abs(relativeAngle) < 25 -> "Go straight ahead"
+            relativeAngle in 25.0..155.0 -> "Turn left"
+            relativeAngle in -155.0..-25.0 -> "Turn right"
+            else -> "Turn back"
+        }
+    }
+
     // Position recognition via raw local coordinates is unreliable (different AR origins).
     // Only OCR-based recognition is used.
     private fun recognizeUserPosition(currentPosition: List<Float>) {
@@ -437,7 +539,11 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
         calibrationMapPos = floatArrayOf(mapPosition[0], mapPosition[1], mapPosition[2])
         calibrationNodeId = nodeId
         yawOffset = 0f
-        isCalibrated = false  // Rotation calibration completes after visitor walks a bit
+        isCalibrated = false  // Rotation calibration completes after visitor walks
+        walkedPoints.clear()  // Reset trajectory points for new calibration
+        lastWalkedPointDist = 0f
+        lastCalibratedDistance = 0f
+        cachedEdgeSegments = null  // Re-collect edges
 
         isPositionRecognized = true
         userCurrentPosition = mapPosition
@@ -445,7 +551,7 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
         Log.d(TAG, "✅ Position recognized: $locationName (node: $nodeId)")
         Log.d(TAG, "   Local Position: [${localPosition[0]}, ${localPosition[1]}, ${localPosition[2]}]")
         Log.d(TAG, "   Map Position: [${mapPosition[0]}, ${mapPosition[1]}, ${mapPosition[2]}]")
-        Log.d(TAG, "   ⏳ Rotation calibration pending — walk to complete")
+        Log.d(TAG, "   ⏳ Rotation calibration pending — walk ${CALIBRATION_MIN_DISTANCE}m to complete")
 
         runOnUiThread {
             binding.tvStatus.text = "Position: $locationName"
@@ -506,77 +612,152 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
     }
 
     /**
-     * After OCR position lock, wait for the visitor to walk ~0.7m, then compute
-     * the yaw rotation offset by matching their movement direction against
-     * graph edge directions from the calibration node.
+     * After OCR position lock, compute the yaw rotation offset by fitting the
+     * user's walked trajectory to the graph. Uses:
+     *
+     * 1. Multi-point trajectory: collects walked positions at 0.2m intervals
+     * 2. Edge-based scoring: measures distance to nearest graph EDGE (line segment),
+     *    not just nearest node — much more accurate for paths between nodes
+     * 3. 0.5° resolution brute-force across 360° (720 candidates)
+     * 4. Finds the single yaw that best fits ALL trajectory points simultaneously
+     * 5. Progressive re-refinement as user walks further
      */
     private fun tryCompleteCalibration(currentLocalPos: List<Float>) {
+        val now = System.currentTimeMillis()
+        if (now - lastCalibrationAttemptTime < 200) return
+        lastCalibrationAttemptTime = now
+
         val refLocal = calibrationLocalPos ?: return
         val refMap = calibrationMapPos ?: return
-        val nodeId = calibrationNodeId ?: return
         val graph = floorGraph ?: return
 
-        // Compute horizontal displacement from calibration point
         val dxLocal = currentLocalPos[0] - refLocal[0]
         val dzLocal = currentLocalPos[2] - refLocal[2]
         val distMoved = sqrt(dxLocal * dxLocal + dzLocal * dzLocal)
 
-        if (distMoved < CALIBRATION_MIN_DISTANCE) return // Haven't walked far enough
+        if (distMoved < CALIBRATION_MIN_DISTANCE) return
 
-        val localAngle = atan2(dxLocal.toDouble(), dzLocal.toDouble())
-
-        // Get all edges from the calibration node
-        val edges = graph.adjacencyList[nodeId]
-        if (edges.isNullOrEmpty()) {
-            // No edges — fallback to zero rotation
-            isCalibrated = true
-            Log.w(TAG, "⚠️ No edges from calibration node, using zero rotation")
-            return
+        // Collect trajectory points at regular intervals
+        if (distMoved - lastWalkedPointDist >= WALK_POINT_SPACING || walkedPoints.isEmpty()) {
+            walkedPoints.add(WalkedPoint(dxLocal, dzLocal))
+            lastWalkedPointDist = distMoved
+            if (walkedPoints.size > MAX_CALIBRATION_POINTS) {
+                walkedPoints.removeAt(0)
+            }
         }
+
+        // Need enough trajectory points for reliable fitting
+        if (walkedPoints.size < MIN_CALIBRATION_POINTS) return
+
+        // Skip re-refinement if we haven't walked significantly further
+        if (isCalibrated && distMoved - lastCalibratedDistance < CALIBRATION_REFINE_DISTANCE) return
+
+        // Collect graph edges once (cache for performance)
+        if (cachedEdgeSegments == null) {
+            cachedEdgeSegments = collectGraphEdges(graph)
+        }
+        val edges = cachedEdgeSegments!!
+        if (edges.isEmpty()) return
 
         var bestYaw = 0f
         var bestScore = Float.MAX_VALUE
 
-        for (edge in edges) {
-            val neighbor = graph.nodes[edge.to] ?: continue
-            val dxMap = (neighbor.position[0] - refMap[0]).toFloat()
-            val dzMap = (neighbor.position[2] - refMap[2]).toFloat()
-            val edgeDist = sqrt(dxMap * dxMap + dzMap * dzMap)
-            if (edgeDist < 0.1f) continue // Skip very short edges
-
-            val mapAngle = atan2(dxMap.toDouble(), dzMap.toDouble())
-            val candidateYaw = (mapAngle - localAngle).toFloat()
-
-            // Test: apply this yaw to map current local position to map space
+        // Brute-force at 0.5° precision (720 candidates)
+        // For each candidate yaw, map ALL trajectory points to map space
+        // and score by total distance to nearest graph edges
+        for (halfDeg in 0 until 720) {
+            val candidateYaw = Math.toRadians(halfDeg * 0.5).toFloat()
             val cosA = cos(candidateYaw.toDouble()).toFloat()
             val sinA = sin(candidateYaw.toDouble()).toFloat()
-            val mappedX = refMap[0] + dxLocal * cosA + dzLocal * sinA
-            val mappedZ = refMap[2] - dxLocal * sinA + dzLocal * cosA
-            val mappedPos = listOf(mappedX, currentLocalPos[1], mappedZ)
 
-            // Check how close this mapped position is to any graph node
-            val nearestNode = graph.findNearestNode(mappedPos)
-            val distToGraph = if (nearestNode != null) {
-                graph.calculateDistanceFromFloat(mappedPos, nearestNode.position)
-            } else Float.MAX_VALUE
+            var totalScore = 0f
+            for (point in walkedPoints) {
+                val mappedX = refMap[0] + point.dxLocal * cosA + point.dzLocal * sinA
+                val mappedZ = refMap[2] - point.dxLocal * sinA + point.dzLocal * cosA
+                totalScore += distanceToNearestEdge(mappedX, mappedZ, edges)
+            }
 
-            if (distToGraph < bestScore) {
-                bestScore = distToGraph
+            if (totalScore < bestScore) {
+                bestScore = totalScore
                 bestYaw = candidateYaw
             }
         }
 
+        // Average score per point — reject if too far from any edge
+        val avgScore = bestScore / walkedPoints.size
+        if (avgScore > 1.0f) return
+
         yawOffset = bestYaw
         isCalibrated = true
+        lastCalibratedDistance = distMoved
 
-        Log.d(TAG, "✅ Rotation calibrated! Yaw offset: ${Math.toDegrees(yawOffset.toDouble())}°")
-        Log.d(TAG, "   Local movement: (${String.format("%.2f", dxLocal)}, ${String.format("%.2f", dzLocal)})")
-        Log.d(TAG, "   Distance moved: ${String.format("%.2f", distMoved)}m")
-        Log.d(TAG, "   Best match score: ${String.format("%.3f", bestScore)}m from graph")
+        Log.d(TAG, "✅ Calibration ${if (lastCalibratedDistance < 1.5f) "locked" else "refined"}!")
+        Log.d(TAG, "   Yaw: ${String.format("%.1f", Math.toDegrees(yawOffset.toDouble()))}°")
+        Log.d(TAG, "   Trajectory points: ${walkedPoints.size}, Distance: ${String.format("%.2f", distMoved)}m")
+        Log.d(TAG, "   Avg edge distance: ${String.format("%.3f", avgScore)}m")
 
         runOnUiThread {
             binding.tvOcrStatus.text = "Calibrated ✓ (${String.format("%.0f", Math.toDegrees(yawOffset.toDouble()))}°)"
         }
+    }
+
+    /**
+     * Collect all unique graph edges as line segments for calibration scoring.
+     */
+    private fun collectGraphEdges(graph: FloorGraph): List<EdgeSegment> {
+        val edges = mutableListOf<EdgeSegment>()
+        val seen = mutableSetOf<String>()
+
+        for ((_, edgeList) in graph.adjacencyList) {
+            for (edge in edgeList) {
+                val key = if (edge.from < edge.to) "${edge.from}-${edge.to}" else "${edge.to}-${edge.from}"
+                if (seen.contains(key)) continue
+                seen.add(key)
+
+                val nodeA = graph.nodes[edge.from] ?: continue
+                val nodeB = graph.nodes[edge.to] ?: continue
+                edges.add(EdgeSegment(
+                    nodeA.position[0].toFloat(), nodeA.position[2].toFloat(),
+                    nodeB.position[0].toFloat(), nodeB.position[2].toFloat()
+                ))
+            }
+        }
+        return edges
+    }
+
+    /**
+     * Find the minimum distance from point (px, pz) to any graph edge segment.
+     */
+    private fun distanceToNearestEdge(px: Float, pz: Float, edges: List<EdgeSegment>): Float {
+        var minDist = Float.MAX_VALUE
+        for (edge in edges) {
+            val d = pointToSegmentDist(px, pz, edge.ax, edge.az, edge.bx, edge.bz)
+            if (d < minDist) minDist = d
+        }
+        return minDist
+    }
+
+    /**
+     * Distance from point P to line segment AB in the XZ plane.
+     * Projects P onto line AB and clamps to segment endpoints.
+     */
+    private fun pointToSegmentDist(px: Float, pz: Float, ax: Float, az: Float, bx: Float, bz: Float): Float {
+        val dx = bx - ax
+        val dz = bz - az
+        val lenSq = dx * dx + dz * dz
+        if (lenSq < 0.0001f) {
+            // Degenerate segment (zero length)
+            val ex = px - ax
+            val ez = pz - az
+            return sqrt(ex * ex + ez * ez)
+        }
+        // Project P onto AB, clamp t to [0,1]
+        val t = (((px - ax) * dx + (pz - az) * dz) / lenSq).coerceIn(0f, 1f)
+        val cx = ax + t * dx
+        val cz = az + t * dz
+        val ex = px - cx
+        val ez = pz - cz
+        return sqrt(ex * ex + ez * ez)
     }
 
     private fun runAutoOcr(frame: Frame) {
@@ -657,9 +838,18 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
         if (distance < WAYPOINT_REACHED_DISTANCE) {
             currentWaypointIndex++
             if (currentWaypointIndex >= path.nodes.size) {
+                // Store destination position so avatar can appear there facing user
+                val destNode = path.nodes.last()
+                destinationReachedMapPos = floatArrayOf(
+                    destNode.position[0].toFloat(),
+                    destNode.position[1].toFloat(),
+                    destNode.position[2].toFloat()
+                )
+                hasReachedDestination = true
+
                 isNavigating = false
                 currentPath = null
-                speak("You have reached your destination")
+                speak("You have reached your destination.")
                 runOnUiThread {
                     binding.tvDirection.text = "✅ You have arrived!"
                     binding.tvStatus.text = "Destination reached"
@@ -673,18 +863,19 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
         }
     }
 
-    // Generate continuous arrow positions along the full path from user to destination (Map Coordinates)
+    // Generate a rolling window of 3-4 arrows just ahead of the user (Map Coordinates)
+    // Since this is called every frame with the user's current position, arrows
+    // naturally "roll forward" as the user walks — old arrows disappear behind,
+    // new ones appear ahead. Max error at 3m with 2° calibration error ≈ 0.10m.
     private fun generateContinuousArrows(path: List<GraphNode>, userPosition: List<Float>): List<ArrowPosition> {
         if (path.isEmpty()) return emptyList()
 
         val arrows = mutableListOf<ArrowPosition>()
         var arrowCount = 0
 
-        // Build the complete polyline: user position -> first waypoint -> ... -> destination
         data class PathPoint(val x: Float, val y: Float, val z: Float)
 
         val polyline = mutableListOf<PathPoint>()
-        // Start from user's current position for a truly continuous trail
         polyline.add(PathPoint(userPosition[0], userPosition[1], userPosition[2]))
         for (node in path) {
             polyline.add(PathPoint(
@@ -694,9 +885,8 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
             ))
         }
 
-        // Generate arrows along each segment of the polyline
-        // Start a small offset from user so the first arrow isn't right under their feet
         var isFirstSegment = true
+        var cumulativeDistance = 0f
 
         for (i in 0 until polyline.size - 1) {
             if (arrowCount >= MAX_VISIBLE_ARROWS) break
@@ -713,12 +903,13 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
 
             val angleY = Math.toDegrees(atan2(dx.toDouble(), dz.toDouble())).toFloat()
 
-            // For first segment (user -> first waypoint), skip the first 0.5m so arrows
-            // don't appear directly under the user's feet
             var distance = if (isFirstSegment) 0.5f else 0f
             isFirstSegment = false
 
             while (distance < segmentLength && arrowCount < MAX_VISIBLE_ARROWS) {
+                val distFromUser = cumulativeDistance + distance
+                if (distFromUser > MAX_ARROW_DISTANCE) break
+
                 val t = distance / segmentLength
 
                 val arrowX = start.x + dx * t
@@ -730,10 +921,13 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
 
                 distance += ARROW_SPACING
             }
+
+            cumulativeDistance += segmentLength
+            if (cumulativeDistance > MAX_ARROW_DISTANCE) break
         }
 
         if (arrows.isNotEmpty()) {
-            Log.v(TAG, "📍 Showing ${arrows.size} continuous arrows to destination")
+            Log.v(TAG, "📍 Rolling arrows: ${arrows.size} within ${String.format("%.1f", MAX_ARROW_DISTANCE)}m")
         }
 
         return arrows
@@ -764,22 +958,12 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
 
                     Log.w(TAG, "⛔ RESTRICTED AREA ALERT: Visitor near '${area.name}' (${String.format("%.1f", distance)}m)")
 
-                    // Alert the visitor
-                    speak("Warning! You are entering a restricted area near ${area.name}. This area is restricted. Please turn back.")
+                    // Alert the visitor (warning only — does NOT stop navigation)
+                    speak("Warning! You are near a restricted area: ${area.name}. Please be cautious.")
 
                     runOnUiThread {
                         binding.tvStatus.text = "⛔ RESTRICTED: ${area.name}"
                         Toast.makeText(this, "⛔ Restricted Area: ${area.name}", Toast.LENGTH_LONG).show()
-                    }
-
-                    // Stop navigation if currently navigating towards restricted area
-                    if (isNavigating) {
-                        isNavigating = false
-                        currentPath = null
-                        currentWaypointIndex = 0
-                        runOnUiThread {
-                            binding.tvDirection.text = "⛔ Navigation stopped - Restricted area"
-                        }
                     }
 
                     // Send alert to host via Firebase
@@ -868,7 +1052,7 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
         if (isTtsReady) {
             avatarRenderer?.isSpeaking = true
             textToSpeech?.speak(text, TextToSpeech.QUEUE_FLUSH, null, null)
-            
+
             // Stop speaking animation after estimated duration (rough estimate: 100ms per char)
             val duration = (text.length * 100).toLong()
             binding.surfaceView.postDelayed({
@@ -971,8 +1155,13 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
 
             val cameraPosLocal = listOf(camera.pose.tx(), camera.pose.ty(), camera.pose.tz())
 
-            // Try rotation calibration if position recognized but rotation not yet calibrated
-            if (isPositionRecognized && !isCalibrated) {
+            // Store camera forward direction for directional guidance
+            lastCameraForwardX = -camera.pose.zAxis[0]
+            lastCameraForwardZ = -camera.pose.zAxis[2]
+
+            // Rotation calibration: keep refining even after initial calibration
+            // until confidence is high (progressive improvement)
+            if (isPositionRecognized) {
                 tryCompleteCalibration(cameraPosLocal)
             }
 
@@ -983,14 +1172,29 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
             // Check restricted area proximity
             if (isPositionRecognized) {
                 checkRestrictedAreaProximity(mappedUserPos)
+
+                // Periodic debug: log restricted area distances every ~2 seconds
+                if (System.currentTimeMillis() % 2000 < 50) {
+                    floorGraph?.getRestrictedAreas()?.forEach { area ->
+                        val dist = floorGraph!!.calculateDistanceFromFloat(mappedUserPos, area.position)
+                        Log.d(TAG, "📍 Distance to restricted '${area.name}': ${String.format("%.1f", dist)}m | mapped=[${String.format("%.2f", mappedUserPos[0])}, ${String.format("%.2f", mappedUserPos[2])}] area=[${String.format("%.2f", area.position[0])}, ${String.format("%.2f", area.position[2])}]")
+                    }
+                }
             }
 
             if (!isPositionRecognized) {
                 recognizeUserPosition(cameraPosLocal)
             }
 
+            // Only start navigation after calibration is complete so direction guidance is accurate
             if (pendingDestination != null) {
-                processPendingNavigation()
+                if (isCalibrated) {
+                    processPendingNavigation()
+                } else {
+                    runOnUiThread {
+                        binding.tvStatus.text = "Calibrating... please walk a few steps"
+                    }
+                }
             }
 
             if (isNavigating && currentPath != null) {
@@ -1025,16 +1229,40 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
                     }
                 }
 
-                // Draw destination marker (converted to local space with rotation)
+                // Draw destination marker at the exact last node position (same height as arrows)
                 renderer?.let { r ->
                     val destNode = path.nodes.last()
-                    val pos = destNode.toFloatArray()
-                    val localDest = mapToLocal(pos[0], pos[1], pos[2])
+                    val localDest = mapToLocal(
+                        destNode.position[0].toFloat(),
+                        destNode.position[1].toFloat(),
+                        destNode.position[2].toFloat()
+                    )
                     r.draw(viewMatrix, projectionMatrix, localDest[0], arrowLocalY, localDest[2], destinationColor)
                 }
+            } else if (hasReachedDestination && destinationReachedMapPos != null) {
+                // Destination reached: show avatar at fixed distance from user (same size as idle)
+                // facing the user directly, NOT placed at the destination coordinate
+                val avatarX = cameraPosLocal[0] - (camera.pose.zAxis[0] * AVATAR_DISPLAY_DISTANCE)
+                val avatarY = cameraPosLocal[1] - 1.5f
+                val avatarZ = cameraPosLocal[2] - (camera.pose.zAxis[2] * AVATAR_DISPLAY_DISTANCE)
+
+                // Compute yaw so avatar faces the user
+                val adx = cameraPosLocal[0] - avatarX
+                val adz = cameraPosLocal[2] - avatarZ
+                val facingYaw = Math.toDegrees(atan2(adx.toDouble(), adz.toDouble())).toFloat()
+
+                avatarRenderer?.draw(viewMatrix, projectionMatrix, avatarX, avatarY, avatarZ, facingYaw)
+
+                // Draw destination marker at the actual destination position on the ground
+                val destMap = destinationReachedMapPos!!
+                val localDest = mapToLocal(destMap[0], destMap[1], destMap[2])
+                val markerY = cameraPosLocal[1] - 0.5f
+                renderer?.let { r ->
+                    r.draw(viewMatrix, projectionMatrix, localDest[0], markerY, localDest[2], destinationColor)
+                }
             } else {
-                // Show avatar when not navigating
-                avatarRenderer?.draw(viewMatrix, projectionMatrix, cameraPosLocal[0] - (camera.pose.zAxis[0] * 2.0f), cameraPosLocal[1] - 1.5f, cameraPosLocal[2] - (camera.pose.zAxis[2] * 2.0f))
+                // Show avatar when not navigating (idle, in front of camera)
+                avatarRenderer?.draw(viewMatrix, projectionMatrix, cameraPosLocal[0] - (camera.pose.zAxis[0] * AVATAR_DISPLAY_DISTANCE), cameraPosLocal[1] - 1.5f, cameraPosLocal[2] - (camera.pose.zAxis[2] * AVATAR_DISPLAY_DISTANCE))
             }
 
             // Always render restricted area markers (visible purple circles)

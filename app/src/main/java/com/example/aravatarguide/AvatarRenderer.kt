@@ -129,10 +129,16 @@ class AvatarRenderer {
     //  Draw  (same public signature – drop-in replacement)
     // ═══════════════════════════════════════════════════════════
 
+    /**
+     * @param facingYaw  Y-axis rotation in degrees so the avatar faces a specific direction.
+     *                   0 = default, compute with atan2(dx, dz) from avatar to camera
+     *                   to make the avatar face the viewer.
+     */
     fun draw(
         viewMatrix: FloatArray,
         projectionMatrix: FloatArray,
-        x: Float, y: Float, z: Float
+        x: Float, y: Float, z: Float,
+        facingYaw: Float = 0f
     ) {
         GLES20.glUseProgram(program)
         GLES20.glEnable(GLES20.GL_DEPTH_TEST)
@@ -153,6 +159,10 @@ class AvatarRenderer {
         val base = FloatArray(16)
         Matrix.setIdentityM(base, 0)
         Matrix.translateM(base, 0, x, y, z)
+        // Face the specified direction (e.g. toward the user)
+        if (facingYaw != 0f) {
+            Matrix.rotateM(base, 0, facingYaw, 0f, 1f, 0f)
+        }
         // Gentle hover
         val hover = sin(t * 1.8f) * 0.015f
         Matrix.translateM(base, 0, 0f, hover, 0f)

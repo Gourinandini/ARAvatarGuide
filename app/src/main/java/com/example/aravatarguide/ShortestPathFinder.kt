@@ -9,10 +9,22 @@ data class PathResult(
 
 class ShortestPathFinder(private val graph: FloorGraph) {
 
+    /**
+     * Find path starting from the exact node ID (used when OCR identifies the start location).
+     */
+    fun findPathFromNode(startNodeId: String, destinationName: String): PathResult? {
+        val startNode = graph.nodes[startNodeId] ?: return null
+        val destinationNode = findDestinationNode(destinationName) ?: return null
+        return computePath(startNode, destinationNode)
+    }
+
     fun findPathToDestination(startPos: List<Float>, destinationName: String): PathResult? {
         val startNode = graph.findNearestNode(startPos) ?: return null
         val destinationNode = findDestinationNode(destinationName) ?: return null
+        return computePath(startNode, destinationNode)
+    }
 
+    private fun computePath(startNode: GraphNode, destinationNode: GraphNode): PathResult? {
         val distances = mutableMapOf<String, Float>()
         val previousNodes = mutableMapOf<String, GraphNode?>()
         val visited = mutableSetOf<String>()
@@ -37,8 +49,9 @@ class ShortestPathFinder(private val graph: FloorGraph) {
             }
 
             graph.getNeighborsOf(currentNode).forEach { neighbor ->
-                // Skip restricted areas — never route through them
-                if (neighbor.id !in visited && !neighbor.isRestrictedArea) {
+                if (neighbor.id !in visited) {
+                    // Restricted areas are treated as normal nodes for pathfinding —
+                    // the warning is handled separately in VisitorActivity.
                     val edgeWeight = graph.calculateDistance(currentNode.position, neighbor.position)
                     val newDist = currentDist + edgeWeight
 
