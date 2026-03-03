@@ -118,16 +118,16 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
 
     companion object {
         private const val PERMISSION_CODE = 100
-        private const val WAYPOINT_REACHED_DISTANCE = 0.8f
-        private const val CALIBRATION_MIN_DISTANCE = 0.3f // Start collecting trajectory points after 0.3m
+        private const val WAYPOINT_REACHED_DISTANCE = 1.2f // Increased for simplified turn-point paths
+        private const val CALIBRATION_MIN_DISTANCE = 0.1f // Reduced for faster calibration start
         private const val ARROW_SPACING = 0.6f // Distance between arrows (meters)
         private const val ARROW_HEIGHT_OFFSET = 0.1f // Height above ground
-        private const val MAX_VISIBLE_ARROWS = 4 // Rolling window: only 3-4 arrows ahead of user
-        private const val MAX_ARROW_DISTANCE = 3.0f // Only show arrows within 3m of user
+        private const val MAX_VISIBLE_ARROWS = 5 // Show more arrows for straight-line paths
+        private const val MAX_ARROW_DISTANCE = 4.0f // Show arrows within 4m for better guidance
         private const val RESTRICTED_AREA_ALERT_DISTANCE = 2.0f // Alert when within 2m of restricted area
         private const val TAG = "VisitorActivity"
-        private const val WALK_POINT_SPACING = 0.2f // Collect a trajectory point every 0.2m
-        private const val MIN_CALIBRATION_POINTS = 3 // Need 3 trajectory points for reliable yaw
+        private const val WALK_POINT_SPACING = 0.12f // Reduced for faster calibration
+        private const val MIN_CALIBRATION_POINTS = 2 // Reduced from 3 for faster calibration
         private const val MAX_CALIBRATION_POINTS = 12 // Keep last 12 trajectory points
         private const val CALIBRATION_REFINE_DISTANCE = 0.8f // Re-refine after walking further
         private const val AVATAR_DISPLAY_DISTANCE = 2.0f // Fixed distance to render avatar from user
@@ -452,9 +452,13 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
                     binding.tvDirection.visibility = View.VISIBLE
                     binding.tvStatus.text = "Navigate to $destName"
                 }
-                // Compute direction from the first path segment (aligned with arrows)
-                val initialDirection = computeInitialDirection(pathResult, currentPos)
-                speak("Starting navigation to $destName. $initialDirection and follow the arrows.")
+                // Compute direction — use calibrated direction if available, otherwise generic
+                if (isCalibrated) {
+                    val initialDirection = computeInitialDirection(pathResult, currentPos)
+                    speak("Starting navigation to $destName. $initialDirection and follow the arrows.")
+                } else {
+                    speak("Starting navigation to $destName. Follow the arrows.")
+                }
                 initialGuidanceGiven = true
             } else {
                 Log.w(TAG, "❌ No path found to $destName")
@@ -662,11 +666,31 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
         var bestYaw = 0f
         var bestScore = Float.MAX_VALUE
 
-        // Brute-force at 0.5° precision (720 candidates)
-        // For each candidate yaw, map ALL trajectory points to map space
-        // and score by total distance to nearest graph edges
-        for (halfDeg in 0 until 720) {
-            val candidateYaw = Math.toRadians(halfDeg * 0.5).toFloat()
+        // Two-pass calibration for speed (~190 candidates vs 720 = 3.7x faster):
+        // Pass 1: Coarse search at 2° resolution (180 candidates)
+        for (deg in 0 until 360 step 2) {
+            val candidateYaw = Math.toRadians(deg.toDouble()).toFloat()
+            val cosA = cos(candidateYaw.toDouble()).toFloat()
+            val sinA = sin(candidateYaw.toDouble()).toFloat()
+
+            var totalScore = 0f
+            for (point in walkedPoints) {
+                val mappedX = refMap[0] + point.dxLocal * cosA + point.dzLocal * sinA
+                val mappedZ = refMap[2] - point.dxLocal * sinA + point.dzLocal * cosA
+                totalScore += distanceToNearestEdge(mappedX, mappedZ, edges)
+            }
+
+            if (totalScore < bestScore) {
+                bestScore = totalScore
+                bestYaw = candidateYaw
+            }
+        }
+
+        // Pass 2: Refine ±3° around best at 0.5° resolution (12 candidates)
+        val coarseBestDeg = Math.toDegrees(bestYaw.toDouble())
+        for (i in -6..6) {
+            val refineDeg = coarseBestDeg + i * 0.5
+            val candidateYaw = Math.toRadians(refineDeg).toFloat()
             val cosA = cos(candidateYaw.toDouble()).toFloat()
             val sinA = sin(candidateYaw.toDouble()).toFloat()
 
@@ -687,6 +711,7 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
         val avgScore = bestScore / walkedPoints.size
         if (avgScore > 1.0f) return
 
+        val wasAlreadyCalibrated = isCalibrated
         yawOffset = bestYaw
         isCalibrated = true
         lastCalibratedDistance = distMoved
@@ -698,6 +723,11 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
 
         runOnUiThread {
             binding.tvOcrStatus.text = "Calibrated ✓ (${String.format("%.0f", Math.toDegrees(yawOffset.toDouble()))}°)"
+            // On first calibration during active navigation, give accurate direction guidance
+            if (!wasAlreadyCalibrated && isNavigating && currentPath != null && userCurrentPosition != null) {
+                val dir = computeInitialDirection(currentPath!!, userCurrentPosition!!)
+                speak("Calibrated. $dir.")
+            }
         }
     }
 
@@ -831,8 +861,10 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
         val targetNode = path.nodes[currentWaypointIndex]
         val distance = floorGraph!!.calculateDistanceFromFloat(mappedPosition, targetNode.position)
 
+        val isLastNode = currentWaypointIndex == path.nodes.size - 1
+        val targetLabel = if (isLastNode) path.nodes.last().name else "next turn"
         runOnUiThread {
-            binding.tvDirection.text = String.format("%.1f m to next point", distance)
+            binding.tvDirection.text = String.format("%.1f m to %s", distance, targetLabel)
         }
 
         if (distance < WAYPOINT_REACHED_DISTANCE) {
@@ -855,10 +887,8 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
                     binding.tvStatus.text = "Destination reached"
                 }
             } else {
-                val nextNode = path.nodes[currentWaypointIndex]
-                if (nextNode.isNamedWaypoint) {
-                    speak("Approaching ${nextNode.name}")
-                }
+                // Smart navigation: arrows guide visually at turn points
+                // Don't announce intermediate named locations — go direct to destination
             }
         }
     }
@@ -1186,15 +1216,9 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
                 recognizeUserPosition(cameraPosLocal)
             }
 
-            // Only start navigation after calibration is complete so direction guidance is accurate
+            // Start navigation immediately — calibration refines arrow accuracy in background
             if (pendingDestination != null) {
-                if (isCalibrated) {
-                    processPendingNavigation()
-                } else {
-                    runOnUiThread {
-                        binding.tvStatus.text = "Calibrating... please walk a few steps"
-                    }
-                }
+                processPendingNavigation()
             }
 
             if (isNavigating && currentPath != null) {

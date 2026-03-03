@@ -1,6 +1,8 @@
 package com.example.aravatarguide
 
 import java.util.PriorityQueue
+import kotlin.math.abs
+import kotlin.math.atan2
 
 data class PathResult(
     val nodes: List<GraphNode>,
@@ -75,10 +77,57 @@ class ShortestPathFinder(private val graph: FloorGraph) {
 
         if (path.firstOrNull()?.id == startNode.id) {
             val totalDistance = distances[destinationNode.id] ?: Float.MAX_VALUE
-            return PathResult(path, totalDistance)
+            // Smart navigation: simplify path to straight-line segments between turn points
+            val simplified = simplifyPath(path)
+            return PathResult(simplified, totalDistance)
         }
 
         return null
+    }
+
+    /**
+     * Simplify path by removing intermediate nodes that don't represent
+     * significant direction changes. Creates straight-line arrow segments
+     * between key turning points — smart navigation like Google Maps.
+     *
+     * Instead of following every 0.3m recorded waypoint, arrows go in
+     * straight lines and only change direction at real turn points.
+     */
+    private fun simplifyPath(path: List<GraphNode>, angleThresholdDeg: Float = 15f): List<GraphNode> {
+        if (path.size <= 2) return path
+
+        val result = mutableListOf<GraphNode>()
+        result.add(path.first()) // Always keep start node
+
+        var lastKeptIdx = 0
+
+        for (i in 1 until path.size - 1) {
+            val prev = path[lastKeptIdx]
+            val curr = path[i]
+            val next = path[i + 1]
+
+            // Direction vector from last kept point to current
+            val dx1 = curr.position[0] - prev.position[0]
+            val dz1 = curr.position[2] - prev.position[2]
+            // Direction vector from current to next
+            val dx2 = next.position[0] - curr.position[0]
+            val dz2 = next.position[2] - curr.position[2]
+
+            val angle1 = Math.toDegrees(atan2(dx1, dz1))
+            val angle2 = Math.toDegrees(atan2(dx2, dz2))
+
+            var angleDiff = abs(angle2 - angle1)
+            if (angleDiff > 180.0) angleDiff = 360.0 - angleDiff
+
+            // Keep node only if it represents a significant direction change (turn point)
+            if (angleDiff > angleThresholdDeg) {
+                result.add(curr)
+                lastKeptIdx = i
+            }
+        }
+
+        result.add(path.last()) // Always keep destination
+        return result
     }
 
     /**
