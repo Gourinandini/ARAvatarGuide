@@ -103,6 +103,12 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
     private var lastWalkedPointDist = 0f
     private var lastCalibratedDistance = 0f
 
+    // Rotation-based calibration: instant — turn in place, no walking needed
+    private data class FacingSample(val localFwdX: Float, val localFwdZ: Float)
+    private val facingSamples = mutableListOf<FacingSample>()
+    private var lastSampledFacingDeg = Float.MAX_VALUE
+    private var calibratedByRotation = false // True if only rotation-calibrated (walking will refine)
+
     // Pre-computed graph edge segments for calibration scoring
     private data class EdgeSegment(val ax: Float, val az: Float, val bx: Float, val bz: Float)
     private var cachedEdgeSegments: List<EdgeSegment>? = null
@@ -130,6 +136,9 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
         private const val MIN_CALIBRATION_POINTS = 2 // Reduced from 3 for faster calibration
         private const val MAX_CALIBRATION_POINTS = 12 // Keep last 12 trajectory points
         private const val CALIBRATION_REFINE_DISTANCE = 0.8f // Re-refine after walking further
+        private const val FACING_SAMPLE_INTERVAL_DEG = 5f // Collect facing sample every 5° turn
+        private const val MIN_ROTATION_RANGE_DEG = 15f // Need 15° of turning for calibration
+        private const val MIN_FACING_SAMPLES = 3 // Minimum facing samples for rotation calibration
         private const val AVATAR_DISPLAY_DISTANCE = 2.0f // Fixed distance to render avatar from user
     }
 
@@ -457,7 +466,7 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
                     val initialDirection = computeInitialDirection(pathResult, currentPos)
                     speak("Starting navigation to $destName. $initialDirection and follow the arrows.")
                 } else {
-                    speak("Starting navigation to $destName. Follow the arrows.")
+                    speak("Navigation to $destName ready. Look around slowly to see the path.")
                 }
                 initialGuidanceGiven = true
             } else {
@@ -543,11 +552,14 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
         calibrationMapPos = floatArrayOf(mapPosition[0], mapPosition[1], mapPosition[2])
         calibrationNodeId = nodeId
         yawOffset = 0f
-        isCalibrated = false  // Rotation calibration completes after visitor walks
-        walkedPoints.clear()  // Reset trajectory points for new calibration
+        isCalibrated = false
+        walkedPoints.clear()
         lastWalkedPointDist = 0f
         lastCalibratedDistance = 0f
-        cachedEdgeSegments = null  // Re-collect edges
+        cachedEdgeSegments = null
+        facingSamples.clear()
+        lastSampledFacingDeg = Float.MAX_VALUE
+        calibratedByRotation = false
 
         isPositionRecognized = true
         userCurrentPosition = mapPosition
@@ -555,7 +567,7 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
         Log.d(TAG, "✅ Position recognized: $locationName (node: $nodeId)")
         Log.d(TAG, "   Local Position: [${localPosition[0]}, ${localPosition[1]}, ${localPosition[2]}]")
         Log.d(TAG, "   Map Position: [${mapPosition[0]}, ${mapPosition[1]}, ${mapPosition[2]}]")
-        Log.d(TAG, "   ⏳ Rotation calibration pending — walk ${CALIBRATION_MIN_DISTANCE}m to complete")
+        Log.d(TAG, "   ⏳ Calibration pending — look around slowly to calibrate")
 
         runOnUiThread {
             binding.tvStatus.text = "Position: $locationName"
@@ -566,7 +578,7 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
 
         if (isTtsReady && !hasAskedInitialQuestion && pendingDestination == null) {
             hasAskedInitialQuestion = true
-            speak("Hello! You are near $locationName. Where would you like to go?")
+            speak("Hello! You are near $locationName. Please look around slowly, then tell me where you'd like to go.")
         }
     }
 
@@ -654,7 +666,8 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
         if (walkedPoints.size < MIN_CALIBRATION_POINTS) return
 
         // Skip re-refinement if we haven't walked significantly further
-        if (isCalibrated && distMoved - lastCalibratedDistance < CALIBRATION_REFINE_DISTANCE) return
+        // BUT always allow walking to override rotation-only calibration immediately
+        if (isCalibrated && !calibratedByRotation && distMoved - lastCalibratedDistance < CALIBRATION_REFINE_DISTANCE) return
 
         // Collect graph edges once (cache for performance)
         if (cachedEdgeSegments == null) {
@@ -714,6 +727,7 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
         val wasAlreadyCalibrated = isCalibrated
         yawOffset = bestYaw
         isCalibrated = true
+        calibratedByRotation = false // Walking calibration is more accurate
         lastCalibratedDistance = distMoved
 
         Log.d(TAG, "✅ Calibration ${if (lastCalibratedDistance < 1.5f) "locked" else "refined"}!")
@@ -729,6 +743,150 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
                 speak("Calibrated. $dir.")
             }
         }
+    }
+
+    /**
+     * Rotation-based calibration: determines yaw offset by matching the user's
+     * camera facing directions to graph edge directions from the calibration node.
+     *
+     * The user just needs to look around (turn ~15°+). No walking required.
+     * Works because the user naturally faces corridors more than walls.
+     *
+     * For straight corridors, there may be 180° ambiguity which walking
+     * calibration resolves in 1-2 steps.
+     */
+    private fun tryRotationCalibration() {
+        if (isCalibrated) return
+        val now = System.currentTimeMillis()
+        if (now - lastCalibrationAttemptTime < 150) return
+        lastCalibrationAttemptTime = now
+
+        val graph = floorGraph ?: return
+        val nodeId = calibrationNodeId ?: return
+        val node = graph.nodes[nodeId] ?: return
+        val neighbors = graph.getNeighborsOf(node)
+        if (neighbors.isEmpty()) return
+
+        // Collect camera facing sample
+        val currentAngleDeg = Math.toDegrees(
+            atan2(lastCameraForwardX.toDouble(), lastCameraForwardZ.toDouble())
+        ).toFloat()
+
+        if (facingSamples.isEmpty() || abs(currentAngleDeg - lastSampledFacingDeg) >= FACING_SAMPLE_INTERVAL_DEG) {
+            facingSamples.add(FacingSample(lastCameraForwardX, lastCameraForwardZ))
+            lastSampledFacingDeg = currentAngleDeg
+            if (facingSamples.size > 36) facingSamples.removeAt(0)
+        }
+
+        if (facingSamples.size < MIN_FACING_SAMPLES) return
+
+        // Check angular range of collected samples
+        val angles = facingSamples.map {
+            Math.toDegrees(atan2(it.localFwdX.toDouble(), it.localFwdZ.toDouble())).toFloat()
+        }
+        val range = computeAngularRange(angles)
+        if (range < MIN_ROTATION_RANGE_DEG) return
+
+        // Edge directions from calibration node (map space)
+        val edgeAnglesRad = neighbors.map { neighbor ->
+            val dx = (neighbor.position[0] - node.position[0]).toFloat()
+            val dz = (neighbor.position[2] - node.position[2]).toFloat()
+            atan2(dx.toDouble(), dz.toDouble()).toFloat()
+        }
+
+        var bestYaw = 0f
+        var bestScore = Float.MAX_VALUE
+
+        // Coarse pass: 2° resolution
+        for (deg in 0 until 360 step 2) {
+            val candidateYaw = Math.toRadians(deg.toDouble()).toFloat()
+            val score = scoreRotationCandidate(candidateYaw, facingSamples, edgeAnglesRad)
+            if (score < bestScore) {
+                bestScore = score
+                bestYaw = candidateYaw
+            }
+        }
+
+        // Fine pass: ±3° at 0.5°
+        val coarseDeg = Math.toDegrees(bestYaw.toDouble())
+        for (i in -6..6) {
+            val candidateYaw = Math.toRadians(coarseDeg + i * 0.5).toFloat()
+            val score = scoreRotationCandidate(candidateYaw, facingSamples, edgeAnglesRad)
+            if (score < bestScore) {
+                bestScore = score
+                bestYaw = candidateYaw
+            }
+        }
+
+        // Confidence check: average angular error per sample
+        val avgErrorRad = bestScore / facingSamples.size
+        if (avgErrorRad > Math.toRadians(50.0).toFloat()) return // Too uncertain
+
+        yawOffset = bestYaw
+        isCalibrated = true
+        calibratedByRotation = true
+
+        Log.d(TAG, "✅ Rotation calibration complete!")
+        Log.d(TAG, "   Yaw: ${String.format("%.1f", Math.toDegrees(yawOffset.toDouble()))}°")
+        Log.d(TAG, "   Samples: ${facingSamples.size}, Range: ${String.format("%.0f", range)}°")
+        Log.d(TAG, "   Avg edge alignment error: ${String.format("%.1f", Math.toDegrees(avgErrorRad.toDouble()))}°")
+
+        runOnUiThread {
+            binding.tvOcrStatus.text = "Calibrated ✓ (${String.format("%.0f", Math.toDegrees(yawOffset.toDouble()))}°)"
+        }
+
+        // Give direction guidance if already navigating
+        if (isNavigating && currentPath != null && userCurrentPosition != null && !initialGuidanceGiven) {
+            val dir = computeInitialDirection(currentPath!!, userCurrentPosition!!)
+            speak("Calibrated. $dir and follow the arrows.")
+            initialGuidanceGiven = true
+        }
+    }
+
+    /**
+     * Score a candidate yaw for rotation calibration.
+     * For each facing sample, transforms to map space and measures angular
+     * distance to the nearest graph edge direction.
+     */
+    private fun scoreRotationCandidate(
+        candidateYaw: Float,
+        samples: List<FacingSample>,
+        edgeAnglesRad: List<Float>
+    ): Float {
+        val cosY = cos(candidateYaw.toDouble()).toFloat()
+        val sinY = sin(candidateYaw.toDouble()).toFloat()
+
+        var totalScore = 0f
+        for (sample in samples) {
+            val mapFwdX = sample.localFwdX * cosY + sample.localFwdZ * sinY
+            val mapFwdZ = -sample.localFwdX * sinY + sample.localFwdZ * cosY
+            val mapAngle = atan2(mapFwdX.toDouble(), mapFwdZ.toDouble()).toFloat()
+
+            var minEdgeDist = Float.MAX_VALUE
+            for (edgeAngle in edgeAnglesRad) {
+                var diff = abs(mapAngle - edgeAngle)
+                if (diff > Math.PI.toFloat()) diff = (2 * Math.PI).toFloat() - diff
+                if (diff < minEdgeDist) minEdgeDist = diff
+            }
+            totalScore += minEdgeDist
+        }
+        return totalScore
+    }
+
+    /**
+     * Compute the angular range spanned by a set of angles (in degrees).
+     * Uses the max-gap method: range = 360° - largest gap between sorted angles.
+     */
+    private fun computeAngularRange(anglesDeg: List<Float>): Float {
+        if (anglesDeg.size < 2) return 0f
+        val normalized = anglesDeg.map { ((it % 360) + 360) % 360 }
+        val sorted = normalized.sorted()
+        var maxGap = 0f
+        for (i in 0 until sorted.size - 1) {
+            maxGap = maxOf(maxGap, sorted[i + 1] - sorted[i])
+        }
+        maxGap = maxOf(maxGap, 360f - sorted.last() + sorted.first())
+        return 360f - maxGap
     }
 
     /**
@@ -1189,9 +1347,11 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
             lastCameraForwardX = -camera.pose.zAxis[0]
             lastCameraForwardZ = -camera.pose.zAxis[2]
 
-            // Rotation calibration: keep refining even after initial calibration
-            // until confidence is high (progressive improvement)
+            // Calibration: try rotation first (instant), then walking for refinement
             if (isPositionRecognized) {
+                if (!isCalibrated) {
+                    tryRotationCalibration()
+                }
                 tryCompleteCalibration(cameraPosLocal)
             }
 
@@ -1216,52 +1376,61 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
                 recognizeUserPosition(cameraPosLocal)
             }
 
-            // Start navigation immediately — calibration refines arrow accuracy in background
+            // Process pending navigation (path computation doesn't need calibration)
             if (pendingDestination != null) {
                 processPendingNavigation()
             }
 
             if (isNavigating && currentPath != null) {
-                updateNavigation(mappedUserPos)
+                if (isCalibrated) {
+                    // Arrows only render when calibrated — never shows wrong direction
+                    updateNavigation(mappedUserPos)
 
-                val path = currentPath!!
-                val remainingPath = path.nodes.drop(currentWaypointIndex)
-                val arrows = generateContinuousArrows(remainingPath, mappedUserPos)
+                    val path = currentPath!!
+                    val remainingPath = path.nodes.drop(currentWaypointIndex)
+                    val arrows = generateContinuousArrows(remainingPath, mappedUserPos)
 
-                // Use camera Y for consistent arrow height (avoids floating/sunken arrows)
-                val arrowLocalY = cameraPosLocal[1] - 0.5f
+                    // Use camera Y for consistent arrow height (avoids floating/sunken arrows)
+                    val arrowLocalY = cameraPosLocal[1] - 0.5f
 
-                arrowModel?.let { arrow ->
-                    for (arrowPos in arrows) {
-                        // Convert map-coordinate arrow to local-coordinate space (with rotation)
-                        val localPos = mapToLocal(arrowPos.x, arrowPos.y, arrowPos.z)
+                    arrowModel?.let { arrow ->
+                        for (arrowPos in arrows) {
+                            // Convert map-coordinate arrow to local-coordinate space (with rotation)
+                            val localPos = mapToLocal(arrowPos.x, arrowPos.y, arrowPos.z)
 
-                        val modelMatrix = FloatArray(16)
-                        Matrix.setIdentityM(modelMatrix, 0)
-                        Matrix.translateM(modelMatrix, 0, localPos[0], arrowLocalY, localPos[2])
-                        // Adjust arrow rotation from map space to local space
-                        val localRotation = arrowPos.rotation - Math.toDegrees(yawOffset.toDouble()).toFloat()
-                        Matrix.rotateM(modelMatrix, 0, localRotation, 0f, 1f, 0f)
-                        Matrix.scaleM(modelMatrix, 0, 0.35f, 0.35f, 0.35f)
+                            val modelMatrix = FloatArray(16)
+                            Matrix.setIdentityM(modelMatrix, 0)
+                            Matrix.translateM(modelMatrix, 0, localPos[0], arrowLocalY, localPos[2])
+                            // Adjust arrow rotation from map space to local space
+                            val localRotation = arrowPos.rotation - Math.toDegrees(yawOffset.toDouble()).toFloat()
+                            Matrix.rotateM(modelMatrix, 0, localRotation, 0f, 1f, 0f)
+                            Matrix.scaleM(modelMatrix, 0, 0.35f, 0.35f, 0.35f)
 
-                        val mvpMatrix = FloatArray(16)
-                        val tempMatrix = FloatArray(16)
-                        Matrix.multiplyMM(tempMatrix, 0, viewMatrix, 0, modelMatrix, 0)
-                        Matrix.multiplyMM(mvpMatrix, 0, projectionMatrix, 0, tempMatrix, 0)
+                            val mvpMatrix = FloatArray(16)
+                            val tempMatrix = FloatArray(16)
+                            Matrix.multiplyMM(tempMatrix, 0, viewMatrix, 0, modelMatrix, 0)
+                            Matrix.multiplyMM(mvpMatrix, 0, projectionMatrix, 0, tempMatrix, 0)
 
-                        arrow.draw(mvpMatrix, arrowColor)
+                            arrow.draw(mvpMatrix, arrowColor)
+                        }
                     }
-                }
 
-                // Draw destination marker at the exact last node position (same height as arrows)
-                renderer?.let { r ->
-                    val destNode = path.nodes.last()
-                    val localDest = mapToLocal(
-                        destNode.position[0].toFloat(),
-                        destNode.position[1].toFloat(),
-                        destNode.position[2].toFloat()
-                    )
-                    r.draw(viewMatrix, projectionMatrix, localDest[0], arrowLocalY, localDest[2], destinationColor)
+                    // Draw destination marker at the exact last node position (same height as arrows)
+                    renderer?.let { r ->
+                        val destNode = path.nodes.last()
+                        val localDest = mapToLocal(
+                            destNode.position[0].toFloat(),
+                            destNode.position[1].toFloat(),
+                            destNode.position[2].toFloat()
+                        )
+                        r.draw(viewMatrix, projectionMatrix, localDest[0], arrowLocalY, localDest[2], destinationColor)
+                    }
+                } else {
+                    // Path ready but calibration pending — no arrows shown yet
+                    runOnUiThread {
+                        binding.tvDirection.text = "Look around slowly..."
+                        binding.tvStatus.text = "Calibrating direction..."
+                    }
                 }
             } else if (hasReachedDestination && destinationReachedMapPos != null) {
                 // Destination reached: show avatar at fixed distance from user (same size as idle)
