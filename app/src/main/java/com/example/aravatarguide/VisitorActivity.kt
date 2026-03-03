@@ -1445,14 +1445,6 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
                 val facingYaw = Math.toDegrees(atan2(adx.toDouble(), adz.toDouble())).toFloat()
 
                 avatarRenderer?.draw(viewMatrix, projectionMatrix, avatarX, avatarY, avatarZ, facingYaw)
-
-                // Draw destination marker at the actual destination position on the ground
-                val destMap = destinationReachedMapPos!!
-                val localDest = mapToLocal(destMap[0], destMap[1], destMap[2])
-                val markerY = cameraPosLocal[1] - 0.5f
-                renderer?.let { r ->
-                    r.draw(viewMatrix, projectionMatrix, localDest[0], markerY, localDest[2], destinationColor)
-                }
             } else {
                 // Show avatar when not navigating (idle, in front of camera)
                 avatarRenderer?.draw(viewMatrix, projectionMatrix, cameraPosLocal[0] - (camera.pose.zAxis[0] * AVATAR_DISPLAY_DISTANCE), cameraPosLocal[1] - 1.5f, cameraPosLocal[2] - (camera.pose.zAxis[2] * AVATAR_DISPLAY_DISTANCE))
