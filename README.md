@@ -92,5 +92,5 @@ The system uses **visual-inertial tracking, intelligent routing, and ARCore** to
 
 ### 1️⃣ Clone the Repository
 ```bash
-git clone https://github.com/annamathews070/MITSWAY-AR.git
+git clone https://github.com/Gourinandini/ARAvatarGuide.git
 cd MITSWAY-AR
