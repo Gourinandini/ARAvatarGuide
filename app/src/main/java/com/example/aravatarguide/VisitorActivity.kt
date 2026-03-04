@@ -79,6 +79,7 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
     private var lastRestrictedAlertTime = 0L
     private val RESTRICTED_ALERT_COOLDOWN_MS = 8000L // Don't spam alerts
     private var lastAlertedRestrictedNodeId: String? = null
+    private var isNearRestrictedArea = false // True while user is within restricted area proximity
 
     // OCR components
     private val textRecognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
@@ -122,6 +123,17 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
     private var lastCameraForwardZ = 0f
     private var initialGuidanceGiven = false
 
+    // Step-based arrow activation: arrows appear only after user walks a few steps
+    private var navStartLocalPos: FloatArray? = null
+    private var navWalkDistance = 0f
+    private var arrowsUnlocked = false
+    private var lastDirectionUpdateTime = 0L
+    private val guideArrowColor = floatArrayOf(1.0f, 0.7f, 0.0f, 1.0f) // Orange for guide arrow
+
+    // Off-track detection and rerouting
+    private var lastRerouteTime = 0L
+    private var currentDestinationName: String? = null
+
     companion object {
         private const val PERMISSION_CODE = 100
         private const val WAYPOINT_REACHED_DISTANCE = 1.2f // Increased for simplified turn-point paths
@@ -130,6 +142,7 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
         private const val ARROW_HEIGHT_OFFSET = 0.1f // Height above ground
         private const val MAX_VISIBLE_ARROWS = 5 // Show more arrows for straight-line paths
         private const val MAX_ARROW_DISTANCE = 4.0f // Show arrows within 4m for better guidance
+        private const val WALK_BEFORE_ARROWS = 1.8f // Walk ~2-3 steps before showing arrows
         private const val RESTRICTED_AREA_ALERT_DISTANCE = 2.0f // Alert when within 2m of restricted area
         private const val TAG = "VisitorActivity"
         private const val WALK_POINT_SPACING = 0.12f // Reduced for faster calibration
@@ -140,6 +153,8 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
         private const val MIN_ROTATION_RANGE_DEG = 15f // Need 15° of turning for calibration
         private const val MIN_FACING_SAMPLES = 3 // Minimum facing samples for rotation calibration
         private const val AVATAR_DISPLAY_DISTANCE = 2.0f // Fixed distance to render avatar from user
+        private const val OFF_TRACK_DISTANCE = 3.0f // Reroute if user is >3m from path
+        private const val REROUTE_COOLDOWN_MS = 5000L // Don't reroute more than once every 5 seconds
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -397,10 +412,16 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
     private fun startNavigation(destinationName: String) {
         Log.d(TAG, "Starting navigation to: $destinationName")
         pendingDestination = destinationName
+        currentDestinationName = destinationName
         isNavigating = true
         hasReachedDestination = false
         destinationReachedMapPos = null
         initialGuidanceGiven = false
+        navStartLocalPos = null
+        navWalkDistance = 0f
+        arrowsUnlocked = false
+        lastDirectionUpdateTime = 0L
+        lastRerouteTime = 0L
         runOnUiThread {
             binding.initialStateContainer.visibility = View.GONE
             binding.tvStatus.text = "Finding path to $destinationName..."
@@ -464,9 +485,9 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
                 // Compute direction — use calibrated direction if available, otherwise generic
                 if (isCalibrated) {
                     val initialDirection = computeInitialDirection(pathResult, currentPos)
-                    speak("Starting navigation to $destName. $initialDirection and follow the arrows.")
+                    speak("$initialDirection towards $destName. Start walking and arrows will appear shortly.")
                 } else {
-                    speak("Navigation to $destName ready. Look around slowly to see the path.")
+                    speak("Navigation to $destName ready. Look around slowly to calibrate, then start walking.")
                 }
                 initialGuidanceGiven = true
             } else {
@@ -740,7 +761,7 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
             // On first calibration during active navigation, give accurate direction guidance
             if (!wasAlreadyCalibrated && isNavigating && currentPath != null && userCurrentPosition != null) {
                 val dir = computeInitialDirection(currentPath!!, userCurrentPosition!!)
-                speak("Calibrated. $dir.")
+                speak("Calibrated. $dir. Keep walking and arrows will appear.")
             }
         }
     }
@@ -838,7 +859,7 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
         // Give direction guidance if already navigating
         if (isNavigating && currentPath != null && userCurrentPosition != null && !initialGuidanceGiven) {
             val dir = computeInitialDirection(currentPath!!, userCurrentPosition!!)
-            speak("Calibrated. $dir and follow the arrows.")
+            speak("Calibrated. $dir. Start walking and arrows will appear shortly.")
             initialGuidanceGiven = true
         }
     }
@@ -1025,6 +1046,20 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
             binding.tvDirection.text = String.format("%.1f m to %s", distance, targetLabel)
         }
 
+        // Off-track detection: check if user is too far from the current path
+        if (arrowsUnlocked) {
+            val distToPath = distanceToNearestPathSegment(mappedPosition, path.nodes, currentWaypointIndex)
+            if (distToPath > OFF_TRACK_DISTANCE) {
+                val now = System.currentTimeMillis()
+                if (now - lastRerouteTime > REROUTE_COOLDOWN_MS) {
+                    lastRerouteTime = now
+                    Log.w(TAG, "⚠️ Off track! Distance to path: ${String.format("%.1f", distToPath)}m. Rerouting...")
+                    reroute(mappedPosition)
+                    return
+                }
+            }
+        }
+
         if (distance < WAYPOINT_REACHED_DISTANCE) {
             currentWaypointIndex++
             if (currentWaypointIndex >= path.nodes.size) {
@@ -1051,11 +1086,71 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
         }
     }
 
+    /**
+     * Calculate the minimum distance from the user's position to any remaining
+     * path segment (line between consecutive waypoints).
+     */
+    private fun distanceToNearestPathSegment(userPos: List<Float>, nodes: List<GraphNode>, fromIndex: Int): Float {
+        if (nodes.isEmpty()) return Float.MAX_VALUE
+
+        var minDist = Float.MAX_VALUE
+
+        // Check distance to the current target waypoint
+        val targetDist = floorGraph?.calculateDistanceFromFloat(userPos, nodes[fromIndex].position) ?: Float.MAX_VALUE
+        if (targetDist < minDist) minDist = targetDist
+
+        // Check distance to each remaining path segment
+        for (i in fromIndex until nodes.size - 1) {
+            val ax = nodes[i].position[0].toFloat()
+            val az = nodes[i].position[2].toFloat()
+            val bx = nodes[i + 1].position[0].toFloat()
+            val bz = nodes[i + 1].position[2].toFloat()
+            val d = pointToSegmentDist(userPos[0], userPos[2], ax, az, bx, bz)
+            if (d < minDist) minDist = d
+        }
+
+        return minDist
+    }
+
+    /**
+     * Reroute: recalculate path from the user's current position to the same destination.
+     */
+    private fun reroute(currentMapPos: List<Float>) {
+        val destName = currentDestinationName ?: return
+        val finder = pathFinder ?: return
+
+        try {
+            val newPath = finder.findPathToDestination(currentMapPos, destName)
+            if (newPath != null && newPath.nodes.isNotEmpty()) {
+                currentPath = newPath
+                currentWaypointIndex = 0
+                // Keep arrowsUnlocked = true so arrows show immediately on the new path
+
+                Log.d(TAG, "✅ Rerouted! New path: ${newPath.nodes.size} waypoints, ${String.format("%.1f", newPath.totalDistance)}m")
+
+                speak("You are off track. Recalculating route.")
+                runOnUiThread {
+                    binding.tvStatus.text = "Rerouted to $destName"
+                }
+            } else {
+                Log.w(TAG, "❌ Reroute failed: no path found from current position to $destName")
+                speak("Cannot find a new route. Please go back to the path.")
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Error during reroute", e)
+        }
+    }
+
     // Generate a rolling window of 3-4 arrows just ahead of the user (Map Coordinates)
     // Since this is called every frame with the user's current position, arrows
     // naturally "roll forward" as the user walks — old arrows disappear behind,
     // new ones appear ahead. Max error at 3m with 2° calibration error ≈ 0.10m.
-    private fun generateContinuousArrows(path: List<GraphNode>, userPosition: List<Float>): List<ArrowPosition> {
+    private fun generateContinuousArrows(
+        path: List<GraphNode>,
+        userPosition: List<Float>,
+        maxDistance: Float = MAX_ARROW_DISTANCE,
+        maxArrows: Int = MAX_VISIBLE_ARROWS
+    ): List<ArrowPosition> {
         if (path.isEmpty()) return emptyList()
 
         val arrows = mutableListOf<ArrowPosition>()
@@ -1077,7 +1172,7 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
         var cumulativeDistance = 0f
 
         for (i in 0 until polyline.size - 1) {
-            if (arrowCount >= MAX_VISIBLE_ARROWS) break
+            if (arrowCount >= maxArrows) break
 
             val start = polyline[i]
             val end = polyline[i + 1]
@@ -1094,9 +1189,9 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
             var distance = if (isFirstSegment) 0.5f else 0f
             isFirstSegment = false
 
-            while (distance < segmentLength && arrowCount < MAX_VISIBLE_ARROWS) {
+            while (distance < segmentLength && arrowCount < maxArrows) {
                 val distFromUser = cumulativeDistance + distance
-                if (distFromUser > MAX_ARROW_DISTANCE) break
+                if (distFromUser > maxDistance) break
 
                 val t = distance / segmentLength
 
@@ -1111,11 +1206,11 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
             }
 
             cumulativeDistance += segmentLength
-            if (cumulativeDistance > MAX_ARROW_DISTANCE) break
+            if (cumulativeDistance > maxDistance) break
         }
 
         if (arrows.isNotEmpty()) {
-            Log.v(TAG, "📍 Rolling arrows: ${arrows.size} within ${String.format("%.1f", MAX_ARROW_DISTANCE)}m")
+            Log.v(TAG, "📍 Rolling arrows: ${arrows.size} within ${String.format("%.1f", maxDistance)}m")
         }
 
         return arrows
@@ -1136,6 +1231,7 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
             val distance = graph.calculateDistanceFromFloat(mappedPosition, area.position)
 
             if (distance < RESTRICTED_AREA_ALERT_DISTANCE) {
+                isNearRestrictedArea = true
                 // Check cooldown to avoid spamming
                 val isSameArea = lastAlertedRestrictedNodeId == area.id
                 val cooldownPassed = currentTime - lastRestrictedAlertTime > RESTRICTED_ALERT_COOLDOWN_MS
@@ -1168,6 +1264,7 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
                 val distToLast = graph.calculateDistanceFromFloat(mappedPosition, lastArea.position)
                 if (distToLast > RESTRICTED_AREA_ALERT_DISTANCE * 1.5f) {
                     lastAlertedRestrictedNodeId = null
+                    isNearRestrictedArea = false
                     Log.d(TAG, "✅ Visitor moved away from restricted area")
                 }
             }
@@ -1382,53 +1479,100 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
             }
 
             if (isNavigating && currentPath != null) {
+                // Track distance walked since navigation started
+                if (navStartLocalPos == null) {
+                    navStartLocalPos = floatArrayOf(cameraPosLocal[0], cameraPosLocal[1], cameraPosLocal[2])
+                }
+                val nsp = navStartLocalPos!!
+                val dxNav = cameraPosLocal[0] - nsp[0]
+                val dzNav = cameraPosLocal[2] - nsp[2]
+                navWalkDistance = sqrt(dxNav * dxNav + dzNav * dzNav)
+
+                // Unlock arrows after walking enough steps AND calibration is ready
+                if (!arrowsUnlocked && isCalibrated && navWalkDistance >= WALK_BEFORE_ARROWS) {
+                    arrowsUnlocked = true
+                    Log.d(TAG, "✅ Arrows unlocked after walking ${String.format("%.1f", navWalkDistance)}m")
+                    speak("Arrows are now visible. Follow them to your destination.")
+                }
+
                 if (isCalibrated) {
-                    // Arrows only render when calibrated — never shows wrong direction
                     updateNavigation(mappedUserPos)
 
-                    val path = currentPath!!
-                    val remainingPath = path.nodes.drop(currentWaypointIndex)
-                    val arrows = generateContinuousArrows(remainingPath, mappedUserPos)
+                    if (arrowsUnlocked) {
+                        // Progressive arrows: start with fewer, grow as user walks further
+                        val stepsAfterUnlock = (navWalkDistance - WALK_BEFORE_ARROWS).coerceAtLeast(0f)
+                        val progressiveMaxDist = minOf(MAX_ARROW_DISTANCE, 1.5f + stepsAfterUnlock)
+                        val progressiveMaxArrows = minOf(MAX_VISIBLE_ARROWS, 2 + (stepsAfterUnlock / 0.8f).toInt())
 
-                    // Use camera Y for consistent arrow height (avoids floating/sunken arrows)
-                    val arrowLocalY = cameraPosLocal[1] - 0.5f
+                        val path = currentPath!!
+                        val remainingPath = path.nodes.drop(currentWaypointIndex)
+                        val arrows = generateContinuousArrows(remainingPath, mappedUserPos, progressiveMaxDist, progressiveMaxArrows)
 
-                    arrowModel?.let { arrow ->
-                        for (arrowPos in arrows) {
-                            // Convert map-coordinate arrow to local-coordinate space (with rotation)
-                            val localPos = mapToLocal(arrowPos.x, arrowPos.y, arrowPos.z)
+                        // Use camera Y for consistent arrow height (avoids floating/sunken arrows)
+                        val arrowLocalY = cameraPosLocal[1] - 0.5f
 
-                            val modelMatrix = FloatArray(16)
-                            Matrix.setIdentityM(modelMatrix, 0)
-                            Matrix.translateM(modelMatrix, 0, localPos[0], arrowLocalY, localPos[2])
-                            // Adjust arrow rotation from map space to local space
-                            val localRotation = arrowPos.rotation - Math.toDegrees(yawOffset.toDouble()).toFloat()
-                            Matrix.rotateM(modelMatrix, 0, localRotation, 0f, 1f, 0f)
-                            Matrix.scaleM(modelMatrix, 0, 0.35f, 0.35f, 0.35f)
+                        arrowModel?.let { arrow ->
+                            for (arrowPos in arrows) {
+                                // Convert map-coordinate arrow to local-coordinate space (with rotation)
+                                val localPos = mapToLocal(arrowPos.x, arrowPos.y, arrowPos.z)
 
-                            val mvpMatrix = FloatArray(16)
-                            val tempMatrix = FloatArray(16)
-                            Matrix.multiplyMM(tempMatrix, 0, viewMatrix, 0, modelMatrix, 0)
-                            Matrix.multiplyMM(mvpMatrix, 0, projectionMatrix, 0, tempMatrix, 0)
+                                val modelMatrix = FloatArray(16)
+                                Matrix.setIdentityM(modelMatrix, 0)
+                                Matrix.translateM(modelMatrix, 0, localPos[0], arrowLocalY, localPos[2])
+                                // Adjust arrow rotation from map space to local space
+                                val localRotation = arrowPos.rotation - Math.toDegrees(yawOffset.toDouble()).toFloat()
+                                Matrix.rotateM(modelMatrix, 0, localRotation, 0f, 1f, 0f)
+                                Matrix.scaleM(modelMatrix, 0, 0.35f, 0.35f, 0.35f)
 
-                            arrow.draw(mvpMatrix, arrowColor)
+                                val mvpMatrix = FloatArray(16)
+                                val tempMatrix = FloatArray(16)
+                                Matrix.multiplyMM(tempMatrix, 0, viewMatrix, 0, modelMatrix, 0)
+                                Matrix.multiplyMM(mvpMatrix, 0, projectionMatrix, 0, tempMatrix, 0)
+
+                                arrow.draw(mvpMatrix, arrowColor)
+                            }
+                        }
+
+                        // Draw destination marker at the exact last node position (same height as arrows)
+                        renderer?.let { r ->
+                            val destNode = path.nodes.last()
+                            val localDest = mapToLocal(
+                                destNode.position[0].toFloat(),
+                                destNode.position[1].toFloat(),
+                                destNode.position[2].toFloat()
+                            )
+                            r.draw(viewMatrix, projectionMatrix, localDest[0], arrowLocalY, localDest[2], destinationColor)
+                        }
+
+                        // Show avatar when near restricted area during navigation
+                        if (isNearRestrictedArea) {
+                            val avatarX = cameraPosLocal[0] - (camera.pose.zAxis[0] * AVATAR_DISPLAY_DISTANCE)
+                            val avatarY = cameraPosLocal[1] - 1.5f
+                            val avatarZ = cameraPosLocal[2] - (camera.pose.zAxis[2] * AVATAR_DISPLAY_DISTANCE)
+                            val adx = cameraPosLocal[0] - avatarX
+                            val adz = cameraPosLocal[2] - avatarZ
+                            val facingYaw = Math.toDegrees(atan2(adx.toDouble(), adz.toDouble())).toFloat()
+                            avatarRenderer?.draw(viewMatrix, projectionMatrix, avatarX, avatarY, avatarZ, facingYaw)
+                        }
+                    } else {
+                        // Calibrated but haven't walked enough — show single guide arrow + direction text
+                        drawSingleGuideArrow(viewMatrix, projectionMatrix, cameraPosLocal)
+                        val now = System.currentTimeMillis()
+                        if (now - lastDirectionUpdateTime > 500) {
+                            lastDirectionUpdateTime = now
+                            val dir = computeInitialDirection(currentPath!!, mappedUserPos)
+                            runOnUiThread {
+                                binding.tvDirection.text = "$dir — walk a few steps"
+                                binding.tvStatus.text = "Walk to see arrows..."
+                            }
                         }
                     }
-
-                    // Draw destination marker at the exact last node position (same height as arrows)
-                    renderer?.let { r ->
-                        val destNode = path.nodes.last()
-                        val localDest = mapToLocal(
-                            destNode.position[0].toFloat(),
-                            destNode.position[1].toFloat(),
-                            destNode.position[2].toFloat()
-                        )
-                        r.draw(viewMatrix, projectionMatrix, localDest[0], arrowLocalY, localDest[2], destinationColor)
-                    }
                 } else {
-                    // Path ready but calibration pending — no arrows shown yet
+                    // Path ready but calibration pending — show single guide arrow
+                    // Use graph topology: from calibration node toward first path node
+                    drawSingleGuideArrow(viewMatrix, projectionMatrix, cameraPosLocal)
                     runOnUiThread {
-                        binding.tvDirection.text = "Look around slowly..."
+                        binding.tvDirection.text = "Follow the arrow and walk..."
                         binding.tvStatus.text = "Calibrating direction..."
                     }
                 }
@@ -1464,6 +1608,62 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
         } catch (e: Exception) {
             Log.e(TAG, "Error in onDrawFrame", e)
         }
+    }
+
+    /**
+     * Draw a single orange guide arrow in front of the camera pointing toward
+     * the first path node. Uses graph topology from the calibration node so it
+     * works even before yaw calibration is complete.
+     */
+    private fun drawSingleGuideArrow(
+        viewMatrix: FloatArray,
+        projectionMatrix: FloatArray,
+        cameraPosLocal: List<Float>
+    ) {
+        val path = currentPath ?: return
+        if (path.nodes.isEmpty()) return
+        val arrow = arrowModel ?: return
+        val graph = floorGraph ?: return
+        val startNodeId = calibrationNodeId ?: return
+        val startNode = graph.nodes[startNodeId] ?: return
+
+        // Determine direction from calibration node toward first path node (in map space)
+        val target = path.nodes.first()
+        var dx = (target.position[0] - startNode.position[0]).toFloat()
+        var dz = (target.position[2] - startNode.position[2]).toFloat()
+        val distToFirst = sqrt(dx * dx + dz * dz)
+        // If the first node is basically the start node, use the second
+        if (distToFirst < 0.3f && path.nodes.size > 1) {
+            val second = path.nodes[1]
+            dx = (second.position[0] - startNode.position[0]).toFloat()
+            dz = (second.position[2] - startNode.position[2]).toFloat()
+        }
+        // Map-space angle of path direction
+        val pathAngleMap = atan2(dx.toDouble(), dz.toDouble()).toFloat()
+
+        // Convert to local-space rotation for the arrow
+        // localAngle = mapAngle - yawOffset
+        val localRotationDeg = Math.toDegrees((pathAngleMap - yawOffset).toDouble()).toFloat()
+
+        // Place arrow 1.5m in front of user on the ground, along the path direction (local space)
+        val localAngle = pathAngleMap - yawOffset
+        val arrowDist = 1.5f
+        val arrowX = cameraPosLocal[0] + sin(localAngle.toDouble()).toFloat() * arrowDist
+        val arrowY = cameraPosLocal[1] - 0.5f
+        val arrowZ = cameraPosLocal[2] + cos(localAngle.toDouble()).toFloat() * arrowDist
+
+        val modelMatrix = FloatArray(16)
+        Matrix.setIdentityM(modelMatrix, 0)
+        Matrix.translateM(modelMatrix, 0, arrowX, arrowY, arrowZ)
+        Matrix.rotateM(modelMatrix, 0, localRotationDeg, 0f, 1f, 0f)
+        Matrix.scaleM(modelMatrix, 0, 0.45f, 0.45f, 0.45f) // Slightly larger than nav arrows
+
+        val mvpMatrix = FloatArray(16)
+        val tempMatrix = FloatArray(16)
+        Matrix.multiplyMM(tempMatrix, 0, viewMatrix, 0, modelMatrix, 0)
+        Matrix.multiplyMM(mvpMatrix, 0, projectionMatrix, 0, tempMatrix, 0)
+
+        arrow.draw(mvpMatrix, guideArrowColor)
     }
 
     data class ArrowPosition(
