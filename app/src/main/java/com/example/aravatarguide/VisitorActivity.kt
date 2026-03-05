@@ -130,10 +130,6 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
     private var lastDirectionUpdateTime = 0L
     private val guideArrowColor = floatArrayOf(1.0f, 0.7f, 0.0f, 1.0f) // Orange for guide arrow
 
-    // Off-track detection and rerouting
-    private var lastRerouteTime = 0L
-    private var currentDestinationName: String? = null
-
     companion object {
         private const val PERMISSION_CODE = 100
         private const val WAYPOINT_REACHED_DISTANCE = 1.2f // Increased for simplified turn-point paths
@@ -142,7 +138,7 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
         private const val ARROW_HEIGHT_OFFSET = 0.1f // Height above ground
         private const val MAX_VISIBLE_ARROWS = 5 // Show more arrows for straight-line paths
         private const val MAX_ARROW_DISTANCE = 4.0f // Show arrows within 4m for better guidance
-        private const val WALK_BEFORE_ARROWS = 1.8f // Walk ~2-3 steps before showing arrows
+        private const val WALK_BEFORE_ARROWS = 0.8f // Walk ~1 step before showing arrows
         private const val RESTRICTED_AREA_ALERT_DISTANCE = 2.0f // Alert when within 2m of restricted area
         private const val TAG = "VisitorActivity"
         private const val WALK_POINT_SPACING = 0.12f // Reduced for faster calibration
@@ -153,8 +149,6 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
         private const val MIN_ROTATION_RANGE_DEG = 15f // Need 15° of turning for calibration
         private const val MIN_FACING_SAMPLES = 3 // Minimum facing samples for rotation calibration
         private const val AVATAR_DISPLAY_DISTANCE = 2.0f // Fixed distance to render avatar from user
-        private const val OFF_TRACK_DISTANCE = 3.0f // Reroute if user is >3m from path
-        private const val REROUTE_COOLDOWN_MS = 5000L // Don't reroute more than once every 5 seconds
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -412,7 +406,6 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
     private fun startNavigation(destinationName: String) {
         Log.d(TAG, "Starting navigation to: $destinationName")
         pendingDestination = destinationName
-        currentDestinationName = destinationName
         isNavigating = true
         hasReachedDestination = false
         destinationReachedMapPos = null
@@ -421,7 +414,6 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
         navWalkDistance = 0f
         arrowsUnlocked = false
         lastDirectionUpdateTime = 0L
-        lastRerouteTime = 0L
         runOnUiThread {
             binding.initialStateContainer.visibility = View.GONE
             binding.tvStatus.text = "Finding path to $destinationName..."
@@ -1046,20 +1038,6 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
             binding.tvDirection.text = String.format("%.1f m to %s", distance, targetLabel)
         }
 
-        // Off-track detection: check if user is too far from the current path
-        if (arrowsUnlocked) {
-            val distToPath = distanceToNearestPathSegment(mappedPosition, path.nodes, currentWaypointIndex)
-            if (distToPath > OFF_TRACK_DISTANCE) {
-                val now = System.currentTimeMillis()
-                if (now - lastRerouteTime > REROUTE_COOLDOWN_MS) {
-                    lastRerouteTime = now
-                    Log.w(TAG, "⚠️ Off track! Distance to path: ${String.format("%.1f", distToPath)}m. Rerouting...")
-                    reroute(mappedPosition)
-                    return
-                }
-            }
-        }
-
         if (distance < WAYPOINT_REACHED_DISTANCE) {
             currentWaypointIndex++
             if (currentWaypointIndex >= path.nodes.size) {
@@ -1083,61 +1061,6 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
                 // Smart navigation: arrows guide visually at turn points
                 // Don't announce intermediate named locations — go direct to destination
             }
-        }
-    }
-
-    /**
-     * Calculate the minimum distance from the user's position to any remaining
-     * path segment (line between consecutive waypoints).
-     */
-    private fun distanceToNearestPathSegment(userPos: List<Float>, nodes: List<GraphNode>, fromIndex: Int): Float {
-        if (nodes.isEmpty()) return Float.MAX_VALUE
-
-        var minDist = Float.MAX_VALUE
-
-        // Check distance to the current target waypoint
-        val targetDist = floorGraph?.calculateDistanceFromFloat(userPos, nodes[fromIndex].position) ?: Float.MAX_VALUE
-        if (targetDist < minDist) minDist = targetDist
-
-        // Check distance to each remaining path segment
-        for (i in fromIndex until nodes.size - 1) {
-            val ax = nodes[i].position[0].toFloat()
-            val az = nodes[i].position[2].toFloat()
-            val bx = nodes[i + 1].position[0].toFloat()
-            val bz = nodes[i + 1].position[2].toFloat()
-            val d = pointToSegmentDist(userPos[0], userPos[2], ax, az, bx, bz)
-            if (d < minDist) minDist = d
-        }
-
-        return minDist
-    }
-
-    /**
-     * Reroute: recalculate path from the user's current position to the same destination.
-     */
-    private fun reroute(currentMapPos: List<Float>) {
-        val destName = currentDestinationName ?: return
-        val finder = pathFinder ?: return
-
-        try {
-            val newPath = finder.findPathToDestination(currentMapPos, destName)
-            if (newPath != null && newPath.nodes.isNotEmpty()) {
-                currentPath = newPath
-                currentWaypointIndex = 0
-                // Keep arrowsUnlocked = true so arrows show immediately on the new path
-
-                Log.d(TAG, "✅ Rerouted! New path: ${newPath.nodes.size} waypoints, ${String.format("%.1f", newPath.totalDistance)}m")
-
-                speak("You are off track. Recalculating route.")
-                runOnUiThread {
-                    binding.tvStatus.text = "Rerouted to $destName"
-                }
-            } else {
-                Log.w(TAG, "❌ Reroute failed: no path found from current position to $destName")
-                speak("Cannot find a new route. Please go back to the path.")
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "❌ Error during reroute", e)
         }
     }
 
@@ -1492,7 +1415,6 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
                 if (!arrowsUnlocked && isCalibrated && navWalkDistance >= WALK_BEFORE_ARROWS) {
                     arrowsUnlocked = true
                     Log.d(TAG, "✅ Arrows unlocked after walking ${String.format("%.1f", navWalkDistance)}m")
-                    speak("Arrows are now visible. Follow them to your destination.")
                 }
 
                 if (isCalibrated) {
