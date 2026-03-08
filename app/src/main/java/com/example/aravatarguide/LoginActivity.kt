@@ -18,7 +18,8 @@ class LoginActivity : AppCompatActivity() {
         binding.btnLogin.setOnClickListener {
             val password = binding.etPassword.text.toString()
             if (password == "2004") {
-                val intent = Intent(this, ARActivity::class.java)
+                val intent = Intent(this, BuildingActivity::class.java)
+                intent.putExtra("mode", "host")
                 startActivity(intent)
                 finish()
             } else {

@@ -1,7 +1,10 @@
 package com.example.aravatarguide
 
+import android.content.Intent
 import android.os.Bundle
-import android.widget.Toast
+import android.widget.ArrayAdapter
+import android.widget.ListView
+import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
 import com.example.aravatarguide.databinding.ActivityPlacesBinding
 
@@ -14,22 +17,23 @@ class PlacesActivity : AppCompatActivity() {
         binding = ActivityPlacesBinding.inflate(layoutInflater)
         setContentView(binding.root)
 
-        val building = intent.getStringExtra("building")
-        binding.tvBuildingName.text = building
+        val building = intent.getStringExtra("building") ?: ""
+        val floor = intent.getStringExtra("floor") ?: ""
+        val places = intent.getStringArrayListExtra("places") ?: arrayListOf()
 
-        if (building == "M George") {
-            binding.btnPrincipalOffice.setOnClickListener {
-                showDescription("Principal Office", "The head of the institution's office.")
-            }
-            binding.btnAPJHall.setOnClickListener {
-                showDescription("APJ Hall", "A large hall for events and seminars.")
-            }
-        } else {
-            // Handle other buildings here
+        binding.tvBuildingName.text = "$building — $floor"
+
+        val adapter = ArrayAdapter(this, android.R.layout.simple_list_item_1, places)
+        binding.lvPlaces.adapter = adapter
+
+        binding.lvPlaces.setOnItemClickListener { _, _, position, _ ->
+            val destination = places[position]
+            val intent = Intent(this, VisitorActivity::class.java)
+            intent.putExtra("destination", destination)
+            intent.putExtra("building", building)
+            intent.putExtra("floor", floor)
+            intent.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
+            startActivity(intent)
         }
-    }
-
-    private fun showDescription(place: String, description: String) {
-        Toast.makeText(this, "$place: $description", Toast.LENGTH_LONG).show()
     }
 }

@@ -68,6 +68,9 @@ class ARActivity : AppCompatActivity(), GLSurfaceView.Renderer {
     private lateinit var firebasePathManager: FirebasePathManager
     private var isEmergencyActive = false
 
+    private var buildingName: String = ""
+    private var floorName: String = ""
+
     private val recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
     private var shouldCaptureText = false
 
@@ -82,6 +85,9 @@ class ARActivity : AppCompatActivity(), GLSurfaceView.Renderer {
 
         database = FirebaseDatabase.getInstance()
         firebasePathManager = FirebasePathManager()
+
+        buildingName = intent.getStringExtra("building") ?: ""
+        floorName = intent.getStringExtra("floor") ?: ""
 
         // Initialize views
         surfaceView = findViewById(R.id.surfaceView)
@@ -260,9 +266,9 @@ class ARActivity : AppCompatActivity(), GLSurfaceView.Renderer {
             return
         }
 
-        Log.d(TAG, "Saving graph with ${graph.getNodeCount()} nodes, ${graph.getNamedWaypointCount()} named")
+        Log.d(TAG, "Saving graph for $buildingName / $floorName with ${graph.getNodeCount()} nodes, ${graph.getNamedWaypointCount()} named")
 
-        firebasePathManager.saveFloorGraph(graph) { success ->
+        firebasePathManager.saveFloorGraph(buildingName, floorName, graph) { success ->
             runOnUiThread {
                 if (success) {
                     Toast.makeText(

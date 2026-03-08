@@ -14,15 +14,19 @@ class BuildingActivity : AppCompatActivity() {
         binding = ActivityBuildingBinding.inflate(layoutInflater)
         setContentView(binding.root)
 
+        val mode = intent.getStringExtra("mode") ?: "visitor"
+
         binding.btnMGeorge.setOnClickListener {
-            val intent = Intent(this, PlacesActivity::class.java)
-            intent.putExtra("building", "M George")
+            val intent = Intent(this, FloorSelectionActivity::class.java)
+            intent.putExtra("building", "M George Block")
+            intent.putExtra("mode", mode)
             startActivity(intent)
         }
 
         binding.btnRamanujan.setOnClickListener {
-            val intent = Intent(this, PlacesActivity::class.java)
-            intent.putExtra("building", "Ramanujan")
+            val intent = Intent(this, FloorSelectionActivity::class.java)
+            intent.putExtra("building", "Ramanujan Block")
+            intent.putExtra("mode", mode)
             startActivity(intent)
         }
     }

@@ -14,6 +14,7 @@ import android.speech.tts.TextToSpeech
 import android.util.Log
 import android.view.View
 import android.widget.Toast
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
@@ -80,6 +81,13 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
     private val RESTRICTED_ALERT_COOLDOWN_MS = 8000L // Don't spam alerts
     private var lastAlertedRestrictedNodeId: String? = null
     private var isNearRestrictedArea = false // True while user is within restricted area proximity
+    private var showRestrictedAvatar = false
+    private var restrictedAvatarStartTime = 0L
+    private val RESTRICTED_AVATAR_DISPLAY_MS = 5000L
+
+    // Emergency state
+    private var isEmergencyActive = false
+    private var emergencyDialogShown = false
 
     // OCR components
     private val textRecognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
@@ -117,6 +125,16 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
     // Destination arrival: avatar faces user
     private var hasReachedDestination = false
     private var destinationReachedMapPos: FloatArray? = null
+    private var destinationReachedName: String? = null
+    private var hasAskedNextDestination = false
+
+    // Calibration quality tracking
+    private var bestCalibrationScore = Float.MAX_VALUE
+    private var bestCalibrationYaw = 0f
+
+    // Building + floor context (passed from PlacesActivity)
+    private var buildingName: String = ""
+    private var floorName: String = ""
 
     // Camera forward direction (updated each frame for directional guidance)
     private var lastCameraForwardX = 0f
@@ -129,21 +147,23 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
     companion object {
         private const val PERMISSION_CODE = 100
         private const val WAYPOINT_REACHED_DISTANCE = 1.2f // Increased for simplified turn-point paths
-        private const val CALIBRATION_MIN_DISTANCE = 0.1f // Reduced for faster calibration start
+        private const val CALIBRATION_MIN_DISTANCE = 0.08f // Reduced for faster calibration start
         private const val ARROW_SPACING = 0.6f // Distance between arrows (meters)
         private const val ARROW_HEIGHT_OFFSET = 0.1f // Height above ground
-        private const val MAX_VISIBLE_ARROWS = 4 // Rolling window of arrows near user
-        private const val MAX_ARROW_DISTANCE = 3.0f // Show arrows within 3m — keeps them accurate
+        private const val MAX_VISIBLE_ARROWS = 5 // Rolling window of arrows near user
+        private const val MAX_ARROW_DISTANCE = 4.0f // Show arrows within 4m
         private const val RESTRICTED_AREA_ALERT_DISTANCE = 2.0f // Alert when within 2m of restricted area
         private const val TAG = "VisitorActivity"
-        private const val WALK_POINT_SPACING = 0.12f // Reduced for faster calibration
+        private const val WALK_POINT_SPACING = 0.10f // Reduced for faster calibration
         private const val MIN_CALIBRATION_POINTS = 2 // Reduced from 3 for faster calibration
-        private const val MAX_CALIBRATION_POINTS = 12 // Keep last 12 trajectory points
-        private const val CALIBRATION_REFINE_DISTANCE = 0.8f // Re-refine after walking further
-        private const val FACING_SAMPLE_INTERVAL_DEG = 5f // Collect facing sample every 5° turn
-        private const val MIN_ROTATION_RANGE_DEG = 15f // Need 15° of turning for calibration
+        private const val MAX_CALIBRATION_POINTS = 15 // Keep last 15 trajectory points
+        private const val CALIBRATION_REFINE_DISTANCE = 0.6f // Re-refine after walking further
+        private const val FACING_SAMPLE_INTERVAL_DEG = 4f // Collect facing sample every 4° turn
+        private const val MIN_ROTATION_RANGE_DEG = 12f // Need 12° of turning for calibration
         private const val MIN_FACING_SAMPLES = 3 // Minimum facing samples for rotation calibration
         private const val AVATAR_DISPLAY_DISTANCE = 2.0f // Fixed distance to render avatar from user
+        private const val CALIBRATION_ACCEPT_THRESHOLD = 0.8f // Accept calibration if avg dist < this
+        private const val ROTATION_CALIBRATION_MAX_ERROR_DEG = 45.0 // Max angular error for rotation cal
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -171,10 +191,26 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
 
         binding.btnMap.setOnClickListener { startActivity(Intent(this, BuildingActivity::class.java)) }
         binding.btnMicrophone.setOnClickListener { toggleSpeechRecognition() }
-        binding.btnMicrophone.isEnabled = false
+        binding.btnMicrophone.isEnabled = true
 
         textToSpeech = TextToSpeech(this, this)
-        loadFloorGraphFromFirebase()
+
+        // Read building + floor from intent (set by PlacesActivity)
+        buildingName = intent.getStringExtra("building") ?: ""
+        floorName = intent.getStringExtra("floor") ?: ""
+
+        if (buildingName.isNotEmpty() && floorName.isNotEmpty()) {
+            loadFloorGraphFromFirebase()
+        } else {
+            // No building/floor selected yet — prompt user to pick one
+            runOnUiThread {
+                binding.initialStateContainer.visibility = View.VISIBLE
+                binding.tvAvailableLocations.text = "Please select a building and floor from the map."
+                binding.tvStatus.text = "Select a building & floor to begin"
+                binding.btnMicrophone.isEnabled = false
+            }
+        }
+
         checkPermissions()
 
         intent.getStringExtra("destination")?.let { startNavigation(it) }
@@ -182,11 +218,11 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
 
     private fun loadFloorGraphFromFirebase() {
         runOnUiThread {
-            binding.tvStatus.text = "Downloading map..."
+            binding.tvStatus.text = "Downloading map for $buildingName / $floorName..."
             binding.tvAvailableLocations.text = "Loading map from cloud..."
         }
 
-        firebasePathManager.loadFloorGraph { graph ->
+        firebasePathManager.loadFloorGraph(buildingName, floorName) { graph ->
             Log.d(TAG, "Received graph: ${graph?.getNodeCount() ?: 0} nodes")
 
             if (graph != null && !graph.isEmpty()) {
@@ -268,8 +304,8 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
     }
 
     private fun toggleSpeechRecognition() {
-        if (floorGraph == null || !isPositionRecognized) {
-            Toast.makeText(this, "Please wait for position to be recognized.", Toast.LENGTH_SHORT).show()
+        if (floorGraph == null) {
+            Toast.makeText(this, "Please wait for the map to load.", Toast.LENGTH_SHORT).show()
             return
         }
         if (isListening) {
@@ -404,11 +440,14 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
         isNavigating = true
         hasReachedDestination = false
         destinationReachedMapPos = null
+        destinationReachedName = null
+        hasAskedNextDestination = false
         initialGuidanceGiven = false
         lastDirectionUpdateTime = 0L
+        showRestrictedAvatar = false
         runOnUiThread {
-            binding.initialStateContainer.visibility = View.GONE
             binding.tvStatus.text = "Finding path to $destinationName..."
+            binding.btnMicrophone.isEnabled = true
         }
     }
 
@@ -565,6 +604,8 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
         facingSamples.clear()
         lastSampledFacingDeg = Float.MAX_VALUE
         calibratedByRotation = false
+        bestCalibrationScore = Float.MAX_VALUE
+        bestCalibrationYaw = 0f
 
         isPositionRecognized = true
         userCurrentPosition = mapPosition
@@ -633,19 +674,12 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
     }
 
     /**
-     * After OCR position lock, compute the yaw rotation offset by fitting the
-     * user's walked trajectory to the graph. Uses:
-     *
-     * 1. Multi-point trajectory: collects walked positions at 0.2m intervals
-     * 2. Edge-based scoring: measures distance to nearest graph EDGE (line segment),
-     *    not just nearest node — much more accurate for paths between nodes
-     * 3. 0.5° resolution brute-force across 360° (720 candidates)
-     * 4. Finds the single yaw that best fits ALL trajectory points simultaneously
-     * 5. Progressive re-refinement as user walks further
+     * Improved walking calibration with 3-pass search and best-score tracking.
+     * Uses multi-point trajectory, edge-based scoring, and progressive refinement.
      */
     private fun tryCompleteCalibration(currentLocalPos: List<Float>) {
         val now = System.currentTimeMillis()
-        if (now - lastCalibrationAttemptTime < 200) return
+        if (now - lastCalibrationAttemptTime < 150) return
         lastCalibrationAttemptTime = now
 
         val refLocal = calibrationLocalPos ?: return
@@ -667,14 +701,11 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
             }
         }
 
-        // Need enough trajectory points for reliable fitting
         if (walkedPoints.size < MIN_CALIBRATION_POINTS) return
 
-        // Skip re-refinement if we haven't walked significantly further
-        // BUT always allow walking to override rotation-only calibration immediately
+        // Skip re-refinement unless walked enough further OR overriding rotation-only calibration
         if (isCalibrated && !calibratedByRotation && distMoved - lastCalibratedDistance < CALIBRATION_REFINE_DISTANCE) return
 
-        // Collect graph edges once (cache for performance)
         if (cachedEdgeSegments == null) {
             cachedEdgeSegments = collectGraphEdges(graph)
         }
@@ -684,70 +715,77 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
         var bestYaw = 0f
         var bestScore = Float.MAX_VALUE
 
-        // Two-pass calibration for speed (~190 candidates vs 720 = 3.7x faster):
         // Pass 1: Coarse search at 2° resolution (180 candidates)
         for (deg in 0 until 360 step 2) {
             val candidateYaw = Math.toRadians(deg.toDouble()).toFloat()
-            val cosA = cos(candidateYaw.toDouble()).toFloat()
-            val sinA = sin(candidateYaw.toDouble()).toFloat()
-
-            var totalScore = 0f
-            for (point in walkedPoints) {
-                val mappedX = refMap[0] + point.dxLocal * cosA + point.dzLocal * sinA
-                val mappedZ = refMap[2] - point.dxLocal * sinA + point.dzLocal * cosA
-                totalScore += distanceToNearestEdge(mappedX, mappedZ, edges)
-            }
-
-            if (totalScore < bestScore) {
-                bestScore = totalScore
+            val score = scoreWalkingCandidate(candidateYaw, refMap, edges)
+            if (score < bestScore) {
+                bestScore = score
                 bestYaw = candidateYaw
             }
         }
 
-        // Pass 2: Refine ±3° around best at 0.5° resolution (12 candidates)
+        // Pass 2: Refine ±3° at 0.5° resolution
         val coarseBestDeg = Math.toDegrees(bestYaw.toDouble())
         for (i in -6..6) {
-            val refineDeg = coarseBestDeg + i * 0.5
-            val candidateYaw = Math.toRadians(refineDeg).toFloat()
-            val cosA = cos(candidateYaw.toDouble()).toFloat()
-            val sinA = sin(candidateYaw.toDouble()).toFloat()
-
-            var totalScore = 0f
-            for (point in walkedPoints) {
-                val mappedX = refMap[0] + point.dxLocal * cosA + point.dzLocal * sinA
-                val mappedZ = refMap[2] - point.dxLocal * sinA + point.dzLocal * cosA
-                totalScore += distanceToNearestEdge(mappedX, mappedZ, edges)
-            }
-
-            if (totalScore < bestScore) {
-                bestScore = totalScore
+            val candidateYaw = Math.toRadians(coarseBestDeg + i * 0.5).toFloat()
+            val score = scoreWalkingCandidate(candidateYaw, refMap, edges)
+            if (score < bestScore) {
+                bestScore = score
                 bestYaw = candidateYaw
             }
         }
 
-        // Average score per point — reject if too far from any edge
+        // Pass 3: Ultra-fine ±0.5° at 0.1° resolution for best accuracy
+        val fineBestDeg = Math.toDegrees(bestYaw.toDouble())
+        for (i in -5..5) {
+            val candidateYaw = Math.toRadians(fineBestDeg + i * 0.1).toFloat()
+            val score = scoreWalkingCandidate(candidateYaw, refMap, edges)
+            if (score < bestScore) {
+                bestScore = score
+                bestYaw = candidateYaw
+            }
+        }
+
         val avgScore = bestScore / walkedPoints.size
-        if (avgScore > 1.0f) return
+        if (avgScore > CALIBRATION_ACCEPT_THRESHOLD) return
+
+        // Track best-ever score to avoid calibration drift
+        if (bestScore < bestCalibrationScore || !isCalibrated || calibratedByRotation) {
+            bestCalibrationScore = bestScore
+            bestCalibrationYaw = bestYaw
+        }
 
         val wasAlreadyCalibrated = isCalibrated
-        yawOffset = bestYaw
+        yawOffset = bestCalibrationYaw
         isCalibrated = true
-        calibratedByRotation = false // Walking calibration is more accurate
+        calibratedByRotation = false
         lastCalibratedDistance = distMoved
 
         Log.d(TAG, "✅ Calibration ${if (lastCalibratedDistance < 1.5f) "locked" else "refined"}!")
         Log.d(TAG, "   Yaw: ${String.format("%.1f", Math.toDegrees(yawOffset.toDouble()))}°")
-        Log.d(TAG, "   Trajectory points: ${walkedPoints.size}, Distance: ${String.format("%.2f", distMoved)}m")
+        Log.d(TAG, "   Points: ${walkedPoints.size}, Distance: ${String.format("%.2f", distMoved)}m")
         Log.d(TAG, "   Avg edge distance: ${String.format("%.3f", avgScore)}m")
 
         runOnUiThread {
             binding.tvOcrStatus.text = "Calibrated ✓ (${String.format("%.0f", Math.toDegrees(yawOffset.toDouble()))}°)"
-            // On first calibration during active navigation, give accurate direction guidance
             if (!wasAlreadyCalibrated && isNavigating && currentPath != null && userCurrentPosition != null) {
                 val dir = computeInitialDirection(currentPath!!, userCurrentPosition!!)
-                speak("Calibrated. $dir. Keep walking and arrows will appear.")
+                speak("Calibrated. $dir. Follow the arrows.")
             }
         }
+    }
+
+    private fun scoreWalkingCandidate(candidateYaw: Float, refMap: FloatArray, edges: List<EdgeSegment>): Float {
+        val cosA = cos(candidateYaw.toDouble()).toFloat()
+        val sinA = sin(candidateYaw.toDouble()).toFloat()
+        var totalScore = 0f
+        for (point in walkedPoints) {
+            val mappedX = refMap[0] + point.dxLocal * cosA + point.dzLocal * sinA
+            val mappedZ = refMap[2] - point.dxLocal * sinA + point.dzLocal * cosA
+            totalScore += distanceToNearestEdge(mappedX, mappedZ, edges)
+        }
+        return totalScore
     }
 
     /**
@@ -792,11 +830,15 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
         val range = computeAngularRange(angles)
         if (range < MIN_ROTATION_RANGE_DEG) return
 
-        // Edge directions from calibration node (map space)
-        val edgeAnglesRad = neighbors.map { neighbor ->
+        // Edge directions from calibration node (map space) — include both directions
+        // to reduce 180° ambiguity in straight corridors
+        val edgeAnglesRad = mutableListOf<Float>()
+        for (neighbor in neighbors) {
             val dx = (neighbor.position[0] - node.position[0]).toFloat()
             val dz = (neighbor.position[2] - node.position[2]).toFloat()
-            atan2(dx.toDouble(), dz.toDouble()).toFloat()
+            val angle = atan2(dx.toDouble(), dz.toDouble()).toFloat()
+            edgeAnglesRad.add(angle)
+            edgeAnglesRad.add(((angle + Math.PI) % (2 * Math.PI)).toFloat())
         }
 
         var bestYaw = 0f
@@ -823,9 +865,20 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
             }
         }
 
+        // Ultra-fine pass: ±0.5° at 0.1°
+        val fineDeg = Math.toDegrees(bestYaw.toDouble())
+        for (i in -5..5) {
+            val candidateYaw = Math.toRadians(fineDeg + i * 0.1).toFloat()
+            val score = scoreRotationCandidate(candidateYaw, facingSamples, edgeAnglesRad)
+            if (score < bestScore) {
+                bestScore = score
+                bestYaw = candidateYaw
+            }
+        }
+
         // Confidence check: average angular error per sample
         val avgErrorRad = bestScore / facingSamples.size
-        if (avgErrorRad > Math.toRadians(50.0).toFloat()) return // Too uncertain
+        if (avgErrorRad > Math.toRadians(ROTATION_CALIBRATION_MAX_ERROR_DEG).toFloat()) return
 
         yawOffset = bestYaw
         isCalibrated = true
@@ -1033,27 +1086,60 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
         if (distance < WAYPOINT_REACHED_DISTANCE) {
             currentWaypointIndex++
             if (currentWaypointIndex >= path.nodes.size) {
-                // Store destination position so avatar can appear there facing user
                 val destNode = path.nodes.last()
                 destinationReachedMapPos = floatArrayOf(
                     destNode.position[0].toFloat(),
                     destNode.position[1].toFloat(),
                     destNode.position[2].toFloat()
                 )
+                destinationReachedName = destNode.name
                 hasReachedDestination = true
+                hasAskedNextDestination = false
 
                 isNavigating = false
                 currentPath = null
-                speak("You have reached your destination.")
+
+                speak("You have reached ${destNode.name}. Would you like to navigate somewhere else?")
+
                 runOnUiThread {
-                    binding.tvDirection.text = "✅ You have arrived!"
+                    binding.tvDirection.text = "✅ You have arrived at ${destNode.name}!"
                     binding.tvStatus.text = "Destination reached"
+                    binding.btnMicrophone.isEnabled = true
+                    showNextDestinationDialog(destNode.name)
                 }
-            } else {
-                // Smart navigation: arrows guide visually at turn points
-                // Don't announce intermediate named locations — go direct to destination
             }
         }
+    }
+
+    /**
+     * Show dialog when destination is reached asking if user wants to go somewhere else.
+     */
+    private fun showNextDestinationDialog(arrivedAt: String) {
+        if (hasAskedNextDestination) return
+        hasAskedNextDestination = true
+
+        AlertDialog.Builder(this)
+            .setTitle("✅ Destination Reached!")
+            .setMessage("You have arrived at $arrivedAt.\n\nWould you like to navigate to another location?")
+            .setPositiveButton("Yes, navigate") { _, _ ->
+                speak("Where would you like to go next? Tap the microphone and tell me.")
+                runOnUiThread {
+                    binding.initialStateContainer.visibility = View.VISIBLE
+                    val destinations = floorGraph?.getNamedWaypoints()?.map { it.name } ?: emptyList()
+                    binding.tvAvailableLocations.text = "Available Locations:\n${destinations.joinToString("\n")}"
+                    binding.tvStatus.text = "Where to next?"
+                }
+            }
+            .setNegativeButton("No, I'm done") { dialog, _ ->
+                dialog.dismiss()
+                speak("Alright! Tap the microphone anytime if you need help.")
+                runOnUiThread {
+                    binding.initialStateContainer.visibility = View.VISIBLE
+                    binding.tvStatus.text = "Ready to help"
+                }
+            }
+            .setCancelable(false)
+            .show()
     }
 
     // Generate a rolling window of 3-4 arrows just ahead of the user (Map Coordinates)
@@ -1147,7 +1233,6 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
 
             if (distance < RESTRICTED_AREA_ALERT_DISTANCE) {
                 isNearRestrictedArea = true
-                // Check cooldown to avoid spamming
                 val isSameArea = lastAlertedRestrictedNodeId == area.id
                 val cooldownPassed = currentTime - lastRestrictedAlertTime > RESTRICTED_ALERT_COOLDOWN_MS
 
@@ -1155,24 +1240,26 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
                     lastRestrictedAlertTime = currentTime
                     lastAlertedRestrictedNodeId = area.id
 
-                    Log.w(TAG, "⛔ RESTRICTED AREA ALERT: Visitor near '${area.name}' (${String.format("%.1f", distance)}m)")
+                    // Show avatar for restricted zone warning
+                    showRestrictedAvatar = true
+                    restrictedAvatarStartTime = currentTime
 
-                    // Alert the visitor (warning only — does NOT stop navigation)
-                    speak("Warning! You are near a restricted area: ${area.name}. Please be cautious.")
+                    Log.w(TAG, "⛔ RESTRICTED AREA: Visitor near '${area.name}' (${String.format("%.1f", distance)}m)")
+
+                    speak("Warning! This is a restricted zone. ${area.name} is a restricted area. Please move away immediately.")
 
                     runOnUiThread {
                         binding.tvStatus.text = "⛔ RESTRICTED: ${area.name}"
                         Toast.makeText(this, "⛔ Restricted Area: ${area.name}", Toast.LENGTH_LONG).show()
                     }
 
-                    // Send alert to host via Firebase
                     sendRestrictedAreaAlert(area.name, distance)
                 }
-                return // Only alert for the closest restricted area
+                return
             }
         }
 
-        // Clear the alert state if we moved away from all restricted areas
+        // Clear alert state if moved away
         if (lastAlertedRestrictedNodeId != null) {
             val lastArea = restrictedAreas.find { it.id == lastAlertedRestrictedNodeId }
             if (lastArea != null) {
@@ -1180,6 +1267,7 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
                 if (distToLast > RESTRICTED_AREA_ALERT_DISTANCE * 1.5f) {
                     lastAlertedRestrictedNodeId = null
                     isNearRestrictedArea = false
+                    showRestrictedAvatar = false
                     Log.d(TAG, "✅ Visitor moved away from restricted area")
                 }
             }
@@ -1221,8 +1309,18 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
     private fun listenForEmergency() {
         database.getReference("emergency").addValueEventListener(object : ValueEventListener {
             override fun onDataChange(snapshot: DataSnapshot) {
-                if (snapshot.getValue(Boolean::class.java) == true) {
+                val isEmergency = snapshot.getValue(Boolean::class.java) == true
+                if (isEmergency && !isEmergencyActive) {
+                    isEmergencyActive = true
+                    emergencyDialogShown = false
                     triggerEmergencyEvacuation()
+                } else if (!isEmergency && isEmergencyActive) {
+                    isEmergencyActive = false
+                    emergencyDialogShown = false
+                    runOnUiThread {
+                        binding.tvStatus.text = "Emergency cancelled"
+                    }
+                    speak("The emergency has been cancelled. You may continue normally.")
                 }
             }
             override fun onCancelled(error: DatabaseError) {
@@ -1232,19 +1330,53 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
     }
 
     private fun triggerEmergencyEvacuation() {
-        if (floorGraph == null || userCurrentPosition == null) return
+        if (floorGraph == null) return
 
-        speak("EMERGENCY! EVACUATE IMMEDIATELY!")
-        Log.d(TAG, "Emergency triggered, finding nearest exit")
+        // Show emergency popup dialog on UI thread
+        runOnUiThread {
+            if (!emergencyDialogShown) {
+                emergencyDialogShown = true
 
-        val closestExit = floorGraph!!.getEmergencyExits().minByOrNull {
-            floorGraph!!.calculateDistanceFromFloat(userCurrentPosition!!, it.position)
+                val dialog = AlertDialog.Builder(this)
+                    .setTitle("🚨 EMERGENCY ALERT 🚨")
+                    .setMessage("There is an emergency in the building!\n\nInitiating emergency evacuation.\nPlease follow the arrows to the nearest exit immediately.")
+                    .setIcon(android.R.drawable.ic_dialog_alert)
+                    .setPositiveButton("OK, Evacuate Now") { dlg, _ ->
+                        dlg.dismiss()
+                    }
+                    .setCancelable(false)
+                    .create()
+
+                dialog.show()
+
+                dialog.getButton(AlertDialog.BUTTON_POSITIVE)?.let { button ->
+                    button.setTextColor(android.graphics.Color.RED)
+                    button.textSize = 18f
+                }
+
+                binding.tvStatus.text = "🚨 EMERGENCY EVACUATION"
+                binding.tvDirection.text = "Follow arrows to nearest exit!"
+                binding.tvDirection.visibility = View.VISIBLE
+            }
         }
 
-        if (closestExit != null) {
-            startNavigation(closestExit.name)
+        // Speak emergency alert
+        speak("EMERGENCY! There is an emergency in the building. Initiating evacuation. Please follow the arrows to the nearest exit immediately!")
+
+        // Find and navigate to nearest emergency exit
+        if (userCurrentPosition != null) {
+            val closestExit = floorGraph!!.getEmergencyExits().minByOrNull {
+                floorGraph!!.calculateDistanceFromFloat(userCurrentPosition!!, it.position)
+            }
+
+            if (closestExit != null) {
+                Log.d(TAG, "🚨 Emergency: navigating to nearest exit: ${closestExit.name}")
+                startNavigation(closestExit.name)
+            } else {
+                speak("No emergency exits have been defined. Please find the nearest exit immediately!")
+            }
         } else {
-            speak("No emergency exits have been defined!")
+            speak("Position not determined yet. Please look for exit signs and evacuate immediately!")
         }
     }
 
@@ -1393,18 +1525,19 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
                 processPendingNavigation()
             }
 
+            // Check if restricted avatar display time has expired
+            if (showRestrictedAvatar && System.currentTimeMillis() - restrictedAvatarStartTime > RESTRICTED_AVATAR_DISPLAY_MS) {
+                showRestrictedAvatar = false
+            }
+
             if (isNavigating && currentPath != null) {
                 if (isCalibrated) {
                     updateNavigation(mappedUserPos)
 
-                    // Dynamic rolling-window arrows: only a few arrows near the user,
-                    // continuously updated each frame based on current position.
-                    // This prevents calibration errors from propagating along the full path.
                     val path = currentPath!!
                     val remainingPath = path.nodes.drop(currentWaypointIndex)
                     val arrows = generateContinuousArrows(remainingPath, mappedUserPos)
 
-                    // Use camera Y for consistent arrow height
                     val arrowLocalY = cameraPosLocal[1] - 0.5f
 
                     arrowModel?.let { arrow ->
@@ -1439,7 +1572,7 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
                     }
 
                     // Show avatar when near restricted area during navigation
-                    if (isNearRestrictedArea) {
+                    if (showRestrictedAvatar) {
                         val avatarX = cameraPosLocal[0] - (camera.pose.zAxis[0] * AVATAR_DISPLAY_DISTANCE)
                         val avatarY = cameraPosLocal[1] - 1.5f
                         val avatarZ = cameraPosLocal[2] - (camera.pose.zAxis[2] * AVATAR_DISPLAY_DISTANCE)
@@ -1449,32 +1582,45 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
                         avatarRenderer?.draw(viewMatrix, projectionMatrix, avatarX, avatarY, avatarZ, facingYaw)
                     }
                 } else {
-                    // Calibration pending — show direction text while system calibrates
                     val now = System.currentTimeMillis()
                     if (now - lastDirectionUpdateTime > 500) {
                         lastDirectionUpdateTime = now
                         runOnUiThread {
-                            binding.tvDirection.text = "Walk a few steps to calibrate..."
+                            binding.tvDirection.text = "Look around slowly to calibrate..."
                             binding.tvStatus.text = "Calibrating direction..."
                         }
                     }
+
+                    // Show avatar even during calibration
+                    val avatarX = cameraPosLocal[0] - (camera.pose.zAxis[0] * AVATAR_DISPLAY_DISTANCE)
+                    val avatarY = cameraPosLocal[1] - 1.5f
+                    val avatarZ = cameraPosLocal[2] - (camera.pose.zAxis[2] * AVATAR_DISPLAY_DISTANCE)
+                    avatarRenderer?.draw(viewMatrix, projectionMatrix, avatarX, avatarY, avatarZ)
                 }
             } else if (hasReachedDestination && destinationReachedMapPos != null) {
-                // Destination reached: show avatar at fixed distance from user (same size as idle)
-                // facing the user directly, NOT placed at the destination coordinate
+                // Destination reached: avatar faces user
                 val avatarX = cameraPosLocal[0] - (camera.pose.zAxis[0] * AVATAR_DISPLAY_DISTANCE)
                 val avatarY = cameraPosLocal[1] - 1.5f
                 val avatarZ = cameraPosLocal[2] - (camera.pose.zAxis[2] * AVATAR_DISPLAY_DISTANCE)
-
-                // Compute yaw so avatar faces the user
                 val adx = cameraPosLocal[0] - avatarX
                 val adz = cameraPosLocal[2] - avatarZ
                 val facingYaw = Math.toDegrees(atan2(adx.toDouble(), adz.toDouble())).toFloat()
-
+                avatarRenderer?.draw(viewMatrix, projectionMatrix, avatarX, avatarY, avatarZ, facingYaw)
+            } else if (showRestrictedAvatar) {
+                // Show avatar for restricted area warning even when not navigating
+                val avatarX = cameraPosLocal[0] - (camera.pose.zAxis[0] * AVATAR_DISPLAY_DISTANCE)
+                val avatarY = cameraPosLocal[1] - 1.5f
+                val avatarZ = cameraPosLocal[2] - (camera.pose.zAxis[2] * AVATAR_DISPLAY_DISTANCE)
+                val adx = cameraPosLocal[0] - avatarX
+                val adz = cameraPosLocal[2] - avatarZ
+                val facingYaw = Math.toDegrees(atan2(adx.toDouble(), adz.toDouble())).toFloat()
                 avatarRenderer?.draw(viewMatrix, projectionMatrix, avatarX, avatarY, avatarZ, facingYaw)
             } else {
-                // Show avatar when not navigating (idle, in front of camera)
-                avatarRenderer?.draw(viewMatrix, projectionMatrix, cameraPosLocal[0] - (camera.pose.zAxis[0] * AVATAR_DISPLAY_DISTANCE), cameraPosLocal[1] - 1.5f, cameraPosLocal[2] - (camera.pose.zAxis[2] * AVATAR_DISPLAY_DISTANCE))
+                // Idle: avatar in front of camera
+                avatarRenderer?.draw(viewMatrix, projectionMatrix,
+                    cameraPosLocal[0] - (camera.pose.zAxis[0] * AVATAR_DISPLAY_DISTANCE),
+                    cameraPosLocal[1] - 1.5f,
+                    cameraPosLocal[2] - (camera.pose.zAxis[2] * AVATAR_DISPLAY_DISTANCE))
             }
 
             // Always render restricted area markers (visible purple circles)

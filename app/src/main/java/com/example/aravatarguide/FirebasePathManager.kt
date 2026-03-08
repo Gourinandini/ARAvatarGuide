@@ -9,10 +9,15 @@ import com.google.firebase.database.ValueEventListener
 class FirebasePathManager {
 
     private val database = FirebaseDatabase.getInstance()
-    private val floorMapRef = database.getReference("floorMap")
+    private val floorMapsRef = database.getReference("floorMaps")
 
     companion object {
         private const val TAG = "FirebasePathManager"
+
+        /** Sanitise a string so it is safe to use as a Firebase Realtime Database key.
+         *  Firebase keys cannot contain '.', '$', '#', '[', ']', or '/'. */
+        fun sanitizeKey(raw: String): String =
+            raw.replace(Regex("[.\\$#\\[\\]/]"), "_").trim()
     }
 
     init {
@@ -23,8 +28,15 @@ class FirebasePathManager {
         }
     }
 
-    fun saveFloorGraph(floorGraph: FloorGraph, onComplete: (Boolean) -> Unit) {
-        Log.d(TAG, "Saving floor graph with ${floorGraph.getNodeCount()} nodes")
+    /** Returns the Firebase reference for a specific building + floor.
+     *  Path: floorMaps/{building}/{floor} */
+    private fun getFloorRef(building: String, floor: String) =
+        floorMapsRef.child(sanitizeKey(building)).child(sanitizeKey(floor))
+
+    // ─────────────────────── SAVE ───────────────────────
+
+    fun saveFloorGraph(building: String, floor: String, floorGraph: FloorGraph, onComplete: (Boolean) -> Unit) {
+        Log.d(TAG, "Saving floor graph for $building / $floor with ${floorGraph.getNodeCount()} nodes")
 
         val graphData = hashMapOf(
             "nodes" to floorGraph.nodes,
@@ -32,9 +44,9 @@ class FirebasePathManager {
             "timestamp" to System.currentTimeMillis()
         )
 
-        floorMapRef.setValue(graphData)
+        getFloorRef(building, floor).setValue(graphData)
             .addOnSuccessListener {
-                Log.d(TAG, "✅ Floor graph saved successfully!")
+                Log.d(TAG, "✅ Floor graph saved successfully for $building / $floor!")
                 onComplete(true)
             }
             .addOnFailureListener { e ->
@@ -43,19 +55,21 @@ class FirebasePathManager {
             }
     }
 
-    fun loadFloorGraph(onComplete: (FloorGraph?) -> Unit) {
-        Log.d(TAG, "Loading floor graph from Firebase...")
+    // ─────────────────────── LOAD ───────────────────────
 
-        floorMapRef.addListenerForSingleValueEvent(object : ValueEventListener {
+    fun loadFloorGraph(building: String, floor: String, onComplete: (FloorGraph?) -> Unit) {
+        Log.d(TAG, "Loading floor graph for $building / $floor from Firebase...")
+
+        getFloorRef(building, floor).addListenerForSingleValueEvent(object : ValueEventListener {
             override fun onDataChange(snapshot: DataSnapshot) {
                 try {
                     if (!snapshot.exists()) {
-                        Log.w(TAG, "⚠️ No data exists at floorMap path")
+                        Log.w(TAG, "⚠️ No data exists for $building / $floor")
                         onComplete(null)
                         return
                     }
 
-                    Log.d(TAG, "Snapshot exists: ${snapshot.value}")
+                    Log.d(TAG, "Snapshot exists for $building / $floor")
 
                     val floorGraph = FloorGraph()
 
@@ -98,10 +112,10 @@ class FirebasePathManager {
                     }
 
                     if (floorGraph.isEmpty()) {
-                        Log.w(TAG, "⚠️ Loaded graph is empty")
+                        Log.w(TAG, "⚠️ Loaded graph is empty for $building / $floor")
                         onComplete(null)
                     } else {
-                        Log.d(TAG, "✅ Successfully loaded graph with ${floorGraph.getNodeCount()} nodes, ${floorGraph.getNamedWaypointCount()} named waypoints")
+                        Log.d(TAG, "✅ Loaded graph for $building / $floor: ${floorGraph.getNodeCount()} nodes, ${floorGraph.getNamedWaypointCount()} named")
                         onComplete(floorGraph)
                     }
 
@@ -119,11 +133,13 @@ class FirebasePathManager {
         })
     }
 
-    fun deleteFloorGraph(onComplete: (Boolean) -> Unit) {
-        Log.d(TAG, "Deleting floor graph...")
-        floorMapRef.removeValue()
+    // ─────────────────────── DELETE ───────────────────────
+
+    fun deleteFloorGraph(building: String, floor: String, onComplete: (Boolean) -> Unit) {
+        Log.d(TAG, "Deleting floor graph for $building / $floor...")
+        getFloorRef(building, floor).removeValue()
             .addOnSuccessListener {
-                Log.d(TAG, "✅ Floor graph deleted successfully")
+                Log.d(TAG, "✅ Floor graph deleted for $building / $floor")
                 onComplete(true)
             }
             .addOnFailureListener { e ->

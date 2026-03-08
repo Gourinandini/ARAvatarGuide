@@ -7,36 +7,38 @@
     android:background="@drawable/bg_gradient_dark"
     android:gravity="center_horizontal"
     android:paddingHorizontal="32dp"
-    tools:context=".PlacesActivity">
+    tools:context=".FloorSelectionActivity">
 
     <!-- Header -->
     <TextView
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:text="📍"
+        android:text="🏛️"
         android:textSize="48sp"
         android:layout_marginTop="40dp" />
 
     <TextView
-        android:id="@+id/tvBuildingName"
+        android:id="@+id/tvBuildingTitle"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:textSize="22sp"
+        android:text="Building"
+        android:textSize="24sp"
         android:textStyle="bold"
         android:textColor="@color/text_primary"
         android:layout_marginTop="12dp" />
 
     <TextView
+        android:id="@+id/tvSubtitle"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:text="Tap a location to navigate"
+        android:text="Select a floor"
         android:textSize="14sp"
         android:textColor="@color/text_secondary"
         android:layout_marginTop="6dp"
         android:layout_marginBottom="24dp" />
 
     <ListView
-        android:id="@+id/lvPlaces"
+        android:id="@+id/lvFloors"
         android:layout_width="match_parent"
         android:layout_height="0dp"
         android:layout_weight="1"
