@@ -5,17 +5,16 @@
     android:layout_height="match_parent"
     android:orientation="vertical"
     android:background="@drawable/bg_gradient_dark"
-    android:gravity="center_horizontal"
-    android:paddingHorizontal="32dp"
     tools:context=".PlacesActivity">
 
     <!-- Header -->
     <TextView
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:text="📍"
+        android:text="\uD83C\uDFDB\uFE0F"
         android:textSize="48sp"
-        android:layout_marginTop="60dp" />
+        android:layout_marginTop="40dp"
+        android:layout_gravity="center_horizontal" />
 
     <TextView
         android:id="@+id/tvBuildingName"
@@ -24,37 +23,34 @@
         android:textSize="26sp"
         android:textStyle="bold"
         android:textColor="@color/text_primary"
-        android:layout_marginTop="12dp" />
+        android:layout_marginTop="12dp"
+        android:layout_gravity="center_horizontal" />
 
     <TextView
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:text="Select a destination"
+        android:text="Building Structure"
         android:textSize="14sp"
         android:textColor="@color/text_secondary"
         android:layout_marginTop="6dp"
-        android:layout_marginBottom="48dp" />
+        android:layout_marginBottom="24dp"
+        android:layout_gravity="center_horizontal" />
 
-    <!-- Place Buttons -->
-    <Button
-        android:id="@+id/btnPrincipalOffice"
+    <!-- Scrollable floor/room list -->
+    <ScrollView
         android:layout_width="match_parent"
-        android:layout_height="60dp"
-        android:text="🏫  Principal Office — 1st Floor"
-        android:textSize="15sp"
-        android:textColor="@color/white"
-        android:textAllCaps="false"
-        android:background="@drawable/bg_btn_primary" />
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:paddingHorizontal="32dp"
+        android:clipToPadding="false">
 
-    <Button
-        android:id="@+id/btnAPJHall"
-        android:layout_width="match_parent"
-        android:layout_height="60dp"
-        android:text="🎓  APJ Hall — 3rd Floor"
-        android:textSize="15sp"
-        android:textColor="@color/text_primary"
-        android:textAllCaps="false"
-        android:background="@drawable/bg_btn_outline"
-        android:layout_marginTop="16dp" />
+        <LinearLayout
+            android:id="@+id/floorContainer"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:paddingBottom="32dp" />
+
+    </ScrollView>
 
 </LinearLayout>

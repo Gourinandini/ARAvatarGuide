@@ -1,6 +1,7 @@
 package com.example.aravatarguide
 
 import android.Manifest
+import android.app.AlertDialog
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.opengl.GLES20
@@ -79,6 +80,12 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
     private var lastRestrictedAlertTime = 0L
     private val RESTRICTED_ALERT_COOLDOWN_MS = 8000L // Don't spam alerts
     private var lastAlertedRestrictedNodeId: String? = null
+    private var isNearRestrictedArea = false
+    private var restrictedAreaWarningStartTime = 0L
+    private val RESTRICTED_AVATAR_DISPLAY_DURATION_MS = 5000L // Show avatar for 5 seconds
+
+    // Emergency popup tracking
+    private var hasShownEmergencyPopup = false
 
     // OCR components
     private val textRecognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
@@ -1144,10 +1151,14 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
                     lastRestrictedAlertTime = currentTime
                     lastAlertedRestrictedNodeId = area.id
 
+                    // Activate restricted area avatar warning
+                    isNearRestrictedArea = true
+                    restrictedAreaWarningStartTime = currentTime
+
                     Log.w(TAG, "⛔ RESTRICTED AREA ALERT: Visitor near '${area.name}' (${String.format("%.1f", distance)}m)")
 
-                    // Alert the visitor (warning only — does NOT stop navigation)
-                    speak("Warning! You are near a restricted area: ${area.name}. Please be cautious.")
+                    // Avatar appears and tells the visitor not to enter
+                    speak("Warning! This is a restricted area. Please do not enter this area.")
 
                     runOnUiThread {
                         binding.tvStatus.text = "⛔ RESTRICTED: ${area.name}"
@@ -1209,8 +1220,12 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
     private fun listenForEmergency() {
         database.getReference("emergency").addValueEventListener(object : ValueEventListener {
             override fun onDataChange(snapshot: DataSnapshot) {
-                if (snapshot.getValue(Boolean::class.java) == true) {
+                val isEmergency = snapshot.getValue(Boolean::class.java) ?: false
+                if (isEmergency && !hasShownEmergencyPopup) {
+                    hasShownEmergencyPopup = true
                     triggerEmergencyEvacuation()
+                } else if (!isEmergency) {
+                    hasShownEmergencyPopup = false
                 }
             }
             override fun onCancelled(error: DatabaseError) {
@@ -1220,19 +1235,41 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
     }
 
     private fun triggerEmergencyEvacuation() {
-        if (floorGraph == null || userCurrentPosition == null) return
+        Log.d(TAG, "Emergency triggered, showing evacuation popup to visitor")
+        speak("EMERGENCY! Please evacuate immediately!")
 
-        speak("EMERGENCY! EVACUATE IMMEDIATELY!")
-        Log.d(TAG, "Emergency triggered, finding nearest exit")
+        runOnUiThread {
+            AlertDialog.Builder(this)
+                .setTitle("🚨 EMERGENCY EVACUATION")
+                .setMessage("An emergency has been triggered!\nPlease evacuate the building immediately.\n\nTap OK to get guided to the nearest exit.")
+                .setPositiveButton("OK") { _, _ ->
+                    navigateToNearestExit()
+                }
+                .setCancelable(false)
+                .show()
+        }
+    }
+
+    private fun navigateToNearestExit() {
+        if (floorGraph == null) {
+            speak("No map available. Please head to the nearest visible exit.")
+            return
+        }
+
+        if (userCurrentPosition == null) {
+            speak("Cannot determine your position. Please head to the nearest visible exit.")
+            return
+        }
 
         val closestExit = floorGraph!!.getEmergencyExits().minByOrNull {
             floorGraph!!.calculateDistanceFromFloat(userCurrentPosition!!, it.position)
         }
 
         if (closestExit != null) {
+            speak("Follow the arrows to the nearest exit: ${closestExit.name}")
             startNavigation(closestExit.name)
         } else {
-            speak("No emergency exits have been defined!")
+            speak("No emergency exits defined. Please head to the nearest visible exit.")
         }
     }
 
@@ -1356,11 +1393,18 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
             }
 
             // Map local AR coordinates to stored Map coordinates (with rotation)
-            val mappedUserPos = localToMap(cameraPosLocal)
+            // Only use dynamic mapping after calibration; before that, use OCR-matched position
+            val mappedUserPos = if (isCalibrated) {
+                localToMap(cameraPosLocal)
+            } else if (calibrationMapPos != null) {
+                listOf(calibrationMapPos!![0], calibrationMapPos!![1], calibrationMapPos!![2])
+            } else {
+                cameraPosLocal
+            }
             userCurrentPosition = mappedUserPos
 
-            // Check restricted area proximity
-            if (isPositionRecognized) {
+            // Check restricted area proximity — only after calibration for accurate positions
+            if (isPositionRecognized && isCalibrated) {
                 checkRestrictedAreaProximity(mappedUserPos)
 
                 // Periodic debug: log restricted area distances every ~2 seconds
@@ -1381,6 +1425,7 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
                 processPendingNavigation()
             }
 
+            // === ARROW RENDERING (during calibrated navigation) ===
             if (isNavigating && currentPath != null) {
                 if (isCalibrated) {
                     // Arrows only render when calibrated — never shows wrong direction
@@ -1432,26 +1477,46 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
                         binding.tvStatus.text = "Calibrating direction..."
                     }
                 }
-            } else if (hasReachedDestination && destinationReachedMapPos != null) {
-                // Destination reached: show avatar at fixed distance from user (same size as idle)
-                // facing the user directly, NOT placed at the destination coordinate
+            }
+
+            // === AVATAR RENDERING (priority: restricted warning > destination > idle) ===
+            val showRestrictedWarningAvatar = isNearRestrictedArea &&
+                System.currentTimeMillis() - restrictedAreaWarningStartTime < RESTRICTED_AVATAR_DISPLAY_DURATION_MS
+
+            if (showRestrictedWarningAvatar) {
+                // Restricted area warning: avatar appears facing user and speaks warning
+                avatarRenderer?.isSpeaking = true
                 val avatarX = cameraPosLocal[0] - (camera.pose.zAxis[0] * AVATAR_DISPLAY_DISTANCE)
                 val avatarY = cameraPosLocal[1] - 1.5f
                 val avatarZ = cameraPosLocal[2] - (camera.pose.zAxis[2] * AVATAR_DISPLAY_DISTANCE)
-
-                // Compute yaw so avatar faces the user
                 val adx = cameraPosLocal[0] - avatarX
                 val adz = cameraPosLocal[2] - avatarZ
                 val facingYaw = Math.toDegrees(atan2(adx.toDouble(), adz.toDouble())).toFloat()
-
                 avatarRenderer?.draw(viewMatrix, projectionMatrix, avatarX, avatarY, avatarZ, facingYaw)
             } else {
-                // Show avatar when not navigating (idle, in front of camera)
-                avatarRenderer?.draw(viewMatrix, projectionMatrix, cameraPosLocal[0] - (camera.pose.zAxis[0] * AVATAR_DISPLAY_DISTANCE), cameraPosLocal[1] - 1.5f, cameraPosLocal[2] - (camera.pose.zAxis[2] * AVATAR_DISPLAY_DISTANCE))
+                // Reset restricted area warning state when duration expires
+                if (isNearRestrictedArea) {
+                    isNearRestrictedArea = false
+                    avatarRenderer?.isSpeaking = false
+                }
+
+                if (hasReachedDestination && destinationReachedMapPos != null) {
+                    // Destination reached: show avatar facing user
+                    val avatarX = cameraPosLocal[0] - (camera.pose.zAxis[0] * AVATAR_DISPLAY_DISTANCE)
+                    val avatarY = cameraPosLocal[1] - 1.5f
+                    val avatarZ = cameraPosLocal[2] - (camera.pose.zAxis[2] * AVATAR_DISPLAY_DISTANCE)
+                    val adx = cameraPosLocal[0] - avatarX
+                    val adz = cameraPosLocal[2] - avatarZ
+                    val facingYaw = Math.toDegrees(atan2(adx.toDouble(), adz.toDouble())).toFloat()
+                    avatarRenderer?.draw(viewMatrix, projectionMatrix, avatarX, avatarY, avatarZ, facingYaw)
+                } else if (!isNavigating) {
+                    // Show avatar when not navigating (idle, in front of camera)
+                    avatarRenderer?.draw(viewMatrix, projectionMatrix, cameraPosLocal[0] - (camera.pose.zAxis[0] * AVATAR_DISPLAY_DISTANCE), cameraPosLocal[1] - 1.5f, cameraPosLocal[2] - (camera.pose.zAxis[2] * AVATAR_DISPLAY_DISTANCE))
+                }
             }
 
-            // Always render restricted area markers (visible purple circles)
-            if (isPositionRecognized) {
+            // Render restricted area markers (visible purple circles) — only after calibration
+            if (isPositionRecognized && isCalibrated) {
                 val arrowLocalY = cameraPosLocal[1] - 0.5f
                 renderer?.let { r ->
                     floorGraph?.getRestrictedAreas()?.forEach { restricted ->
