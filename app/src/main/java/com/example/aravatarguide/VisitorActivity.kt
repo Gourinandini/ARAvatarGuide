@@ -2,11 +2,15 @@ package com.example.aravatarguide
 
 import android.Manifest
 import android.app.AlertDialog
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.opengl.GLES20
 import android.opengl.GLSurfaceView
 import android.opengl.Matrix
+import android.os.Build
 import android.os.Bundle
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
@@ -17,6 +21,8 @@ import android.view.View
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
+import androidx.core.app.NotificationCompat
+import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
 import com.example.aravatarguide.databinding.ActivityVisitorBinding
 import com.google.ar.core.*
@@ -132,21 +138,23 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
     companion object {
         private const val PERMISSION_CODE = 100
         private const val WAYPOINT_REACHED_DISTANCE = 1.2f // Increased for simplified turn-point paths
-        private const val CALIBRATION_MIN_DISTANCE = 0.1f // Reduced for faster calibration start
+        private const val CALIBRATION_MIN_DISTANCE = 0.05f // Further reduced for instant calibration start
         private const val ARROW_SPACING = 0.6f // Distance between arrows (meters)
         private const val ARROW_HEIGHT_OFFSET = 0.1f // Height above ground
         private const val MAX_VISIBLE_ARROWS = 5 // Show more arrows for straight-line paths
         private const val MAX_ARROW_DISTANCE = 4.0f // Show arrows within 4m for better guidance
         private const val RESTRICTED_AREA_ALERT_DISTANCE = 2.0f // Alert when within 2m of restricted area
         private const val TAG = "VisitorActivity"
-        private const val WALK_POINT_SPACING = 0.12f // Reduced for faster calibration
-        private const val MIN_CALIBRATION_POINTS = 2 // Reduced from 3 for faster calibration
+        private const val WALK_POINT_SPACING = 0.08f // Further reduced for faster calibration
+        private const val MIN_CALIBRATION_POINTS = 2 // Minimum points for calibration
         private const val MAX_CALIBRATION_POINTS = 12 // Keep last 12 trajectory points
         private const val CALIBRATION_REFINE_DISTANCE = 0.8f // Re-refine after walking further
-        private const val FACING_SAMPLE_INTERVAL_DEG = 5f // Collect facing sample every 5° turn
-        private const val MIN_ROTATION_RANGE_DEG = 15f // Need 15° of turning for calibration
-        private const val MIN_FACING_SAMPLES = 3 // Minimum facing samples for rotation calibration
+        private const val FACING_SAMPLE_INTERVAL_DEG = 3f // Reduced to 3° for faster sample collection
+        private const val MIN_ROTATION_RANGE_DEG = 10f // Reduced to 10° for faster calibration
+        private const val MIN_FACING_SAMPLES = 2 // Reduced to 2 for faster rotation calibration
         private const val AVATAR_DISPLAY_DISTANCE = 2.0f // Fixed distance to render avatar from user
+        private const val EMERGENCY_CHANNEL_ID = "emergency_evacuation_channel"
+        private const val EMERGENCY_NOTIFICATION_ID = 1001
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -177,10 +185,27 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
         binding.btnMicrophone.isEnabled = false
 
         textToSpeech = TextToSpeech(this, this)
+        createNotificationChannel()
         loadFloorGraphFromFirebase()
         checkPermissions()
 
         intent.getStringExtra("destination")?.let { startNavigation(it) }
+    }
+
+    private fun createNotificationChannel() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val name = "Emergency Evacuation"
+            val descriptionText = "Critical notifications for emergency evacuations"
+            val importance = NotificationManager.IMPORTANCE_HIGH
+            val channel = NotificationChannel(EMERGENCY_CHANNEL_ID, name, importance).apply {
+                description = descriptionText
+                enableVibration(true)
+                enableLights(true)
+            }
+            val notificationManager: NotificationManager =
+                getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            notificationManager.createNotificationChannel(channel)
+        }
     }
 
     private fun loadFloorGraphFromFirebase() {
@@ -727,9 +752,9 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
             }
         }
 
-        // Average score per point — reject if too far from any edge
+        // Average score per point — relaxed threshold for faster calibration
         val avgScore = bestScore / walkedPoints.size
-        if (avgScore > 1.0f) return
+        if (avgScore > 1.5f) return // Relaxed from 1.0f to 1.5f for faster calibration
 
         val wasAlreadyCalibrated = isCalibrated
         yawOffset = bestYaw
@@ -825,9 +850,9 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
             }
         }
 
-        // Confidence check: average angular error per sample
+        // Confidence check: average angular error per sample - relaxed threshold for faster calibration
         val avgErrorRad = bestScore / facingSamples.size
-        if (avgErrorRad > Math.toRadians(50.0).toFloat()) return // Too uncertain
+        if (avgErrorRad > Math.toRadians(60.0).toFloat()) return // Relaxed from 50° to 60° for faster calibration
 
         yawOffset = bestYaw
         isCalibrated = true
@@ -1046,11 +1071,27 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
 
                 isNavigating = false
                 currentPath = null
-                speak("You have reached your destination.")
+                currentWaypointIndex = 0
+                
+                // Clear emergency notification if user reached exit
+                clearEmergencyNotification()
+                
+                // Re-enable mic button and show initial state for next navigation
                 runOnUiThread {
                     binding.tvDirection.text = "✅ You have arrived!"
                     binding.tvStatus.text = "Destination reached"
+                    binding.tvDestination.visibility = View.GONE
+                    binding.tvDirection.visibility = View.GONE
+                    binding.initialStateContainer.visibility = View.VISIBLE
+                    binding.btnMicrophone.isEnabled = true
+                    
+                    // Show available locations again
+                    val destinations = floorGraph?.getNamedWaypoints()?.map { it.name } ?: emptyList()
+                    binding.tvAvailableLocations.text = "Available Locations:\n${destinations.joinToString("\n")}"
                 }
+                
+                // Ask if user wants to go somewhere else
+                speak("You have reached your destination. Would you like to go somewhere else? Just tap the microphone and tell me where.")
             } else {
                 // Smart navigation: arrows guide visually at turn points
                 // Don't announce intermediate named locations — go direct to destination
@@ -1226,6 +1267,7 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
                     triggerEmergencyEvacuation()
                 } else if (!isEmergency) {
                     hasShownEmergencyPopup = false
+                    clearEmergencyNotification()
                 }
             }
             override fun onCancelled(error: DatabaseError) {
@@ -1235,19 +1277,43 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
     }
 
     private fun triggerEmergencyEvacuation() {
-        Log.d(TAG, "Emergency triggered, showing evacuation popup to visitor")
-        speak("EMERGENCY! Please evacuate immediately!")
+        Log.d(TAG, "Emergency triggered, showing notification and navigating to exit")
+        speak("EMERGENCY! Please evacuate immediately! Follow the arrows to the nearest exit.")
 
+        // Show emergency notification
+        showEmergencyNotification()
+
+        // Automatically navigate to nearest exit
         runOnUiThread {
-            AlertDialog.Builder(this)
-                .setTitle("🚨 EMERGENCY EVACUATION")
-                .setMessage("An emergency has been triggered!\nPlease evacuate the building immediately.\n\nTap OK to get guided to the nearest exit.")
-                .setPositiveButton("OK") { _, _ ->
-                    navigateToNearestExit()
-                }
-                .setCancelable(false)
-                .show()
+            navigateToNearestExit()
         }
+    }
+
+    private fun showEmergencyNotification() {
+        val notification = NotificationCompat.Builder(this, EMERGENCY_CHANNEL_ID)
+            .setSmallIcon(android.R.drawable.ic_dialog_alert)
+            .setContentTitle("🚨 EMERGENCY EVACUATION")
+            .setContentText("Emergency evacuation in progress. Follow the AR arrows to the nearest exit.")
+            .setStyle(NotificationCompat.BigTextStyle()
+                .bigText("An emergency has been triggered! Please evacuate the building immediately. Follow the AR arrows displayed on your screen to reach the nearest emergency exit safely."))
+            .setPriority(NotificationCompat.PRIORITY_MAX)
+            .setCategory(NotificationCompat.CATEGORY_ALARM)
+            .setAutoCancel(false)
+            .setOngoing(true)
+            .setVibrate(longArrayOf(0, 500, 200, 500, 200, 500))
+            .build()
+
+        if (ActivityCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED) {
+            NotificationManagerCompat.from(this).notify(EMERGENCY_NOTIFICATION_ID, notification)
+        } else {
+            // If notification permission not granted, show a Toast as fallback
+            Toast.makeText(this, "🚨 EMERGENCY! Follow arrows to exit!", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    private fun clearEmergencyNotification() {
+        NotificationManagerCompat.from(this).cancel(EMERGENCY_NOTIFICATION_ID)
+        Log.d(TAG, "Emergency notification cleared")
     }
 
     private fun navigateToNearestExit() {
