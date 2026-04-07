@@ -596,6 +596,9 @@ class VisitorActivity : AppCompatActivity(), GLSurfaceView.Renderer, TextToSpeec
         isPositionRecognized = true
         userCurrentPosition = mapPosition
 
+        // Update AI with current location context for conversational awareness
+        chatHelper.updateCurrentLocation(locationName)
+
         Log.d(TAG, "✅ Position recognized: $locationName (node: $nodeId)")
         Log.d(TAG, "   Local Position: [${localPosition[0]}, ${localPosition[1]}, ${localPosition[2]}]")
         Log.d(TAG, "   Map Position: [${mapPosition[0]}, ${mapPosition[1]}, ${mapPosition[2]}]")
